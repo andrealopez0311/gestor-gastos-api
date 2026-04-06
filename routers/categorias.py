@@ -1,14 +1,20 @@
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_connection
 from auth import decode_token
 
 router = APIRouter(prefix="/categorias", tags=["categorias"])
+security = HTTPBearer()
+
+def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    user_id = decode_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="No autorizado")
+    return int(user_id)
 
 @router.get("/")
-def get_categorias(authorization: str = Header(...)):
-    token = authorization.replace("Bearer ", "")
-    if not decode_token(token):
-        raise HTTPException(status_code=401, detail="No autorizado")
+def get_categorias(user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT id, nombre, icono, color FROM categorias")

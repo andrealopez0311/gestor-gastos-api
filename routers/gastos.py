@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_connection
 from auth import decode_token
 from pydantic import BaseModel
@@ -6,6 +7,7 @@ from typing import Optional
 import datetime
 
 router = APIRouter(prefix="/gastos", tags=["gastos"])
+security = HTTPBearer()
 
 class GastoRequest(BaseModel):
     categoria_id: int
@@ -13,16 +15,15 @@ class GastoRequest(BaseModel):
     importe: float
     fecha: Optional[str] = None
 
-def get_user(authorization: str):
-    token = authorization.replace("Bearer ", "")
+def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
     user_id = decode_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="No autorizado")
     return int(user_id)
 
 @router.get("/")
-def get_gastos(authorization: str = Header(...)):
-    user_id = get_user(authorization)
+def get_gastos(user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -39,8 +40,7 @@ def get_gastos(authorization: str = Header(...)):
     return [{"id": r[0], "categoria": r[1], "descripcion": r[2], "importe": float(r[3]), "fecha": str(r[4])} for r in rows]
 
 @router.post("/")
-def crear_gasto(data: GastoRequest, authorization: str = Header(...)):
-    user_id = get_user(authorization)
+def crear_gasto(data: GastoRequest, user_id: int = Depends(get_user)):
     fecha = data.fecha or str(datetime.date.today())
     conn = get_connection()
     cur = conn.cursor()
@@ -55,8 +55,7 @@ def crear_gasto(data: GastoRequest, authorization: str = Header(...)):
     return {"mensaje": "Gasto creado", "id": gasto_id}
 
 @router.delete("/{gasto_id}")
-def eliminar_gasto(gasto_id: int, authorization: str = Header(...)):
-    user_id = get_user(authorization)
+def eliminar_gasto(gasto_id: int, user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM gastos WHERE id = %s AND usuario_id = %s", (gasto_id, user_id))
@@ -66,8 +65,7 @@ def eliminar_gasto(gasto_id: int, authorization: str = Header(...)):
     return {"mensaje": "Gasto eliminado"}
 
 @router.get("/resumen")
-def resumen_mensual(authorization: str = Header(...)):
-    user_id = get_user(authorization)
+def resumen_mensual(user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -75,7 +73,7 @@ def resumen_mensual(authorization: str = Header(...)):
         FROM gastos g
         JOIN categorias c ON g.categoria_id = c.id
         WHERE g.usuario_id = %s
-        AND DATE_TRUNC('month', g.fecha) = DATE_TRUNC('month', CURRENT_DATE)
+          AND DATE_TRUNC('month', g.fecha) = DATE_TRUNC('month', CURRENT_DATE)
         GROUP BY c.nombre, c.color
         ORDER BY total DESC
     """, (user_id,))
