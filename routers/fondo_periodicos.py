@@ -38,19 +38,39 @@ def get_fondo(user_id: int = Depends(get_user)):
     hogar_id = get_hogar_id(cur, user_id)
     hoy = datetime.date.today()
 
-    # Acumulado total del fondo
-    cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM fondo_periodicos WHERE hogar_id = %s
-    """, (hogar_id,))
-    acumulado_total = float(cur.fetchone()[0])
-
-    # Reserva mensual total de todos los periódicos
+    # Reserva mensual total
     cur.execute("""
         SELECT COALESCE(SUM(reserva_mensual), 0)
         FROM gastos_periodicos WHERE hogar_id = %s
     """, (hogar_id,))
     reserva_mensual = float(cur.fetchone()[0])
+
+    # Fecha de creación del primer gasto periódico
+    cur.execute("""
+        SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s
+    """, (hogar_id,))
+    primera_fecha = cur.fetchone()[0]
+
+    # Calcular meses transcurridos desde el primer gasto periódico
+    if primera_fecha:
+        meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1
+    else:
+        meses = 0
+
+    # Acumulado teórico = reserva mensual * meses transcurridos
+    acumulado_teorico = reserva_mensual * meses
+
+    # Total ya pagado en cuotas
+    cur.execute("""
+        SELECT COALESCE(SUM(cp.importe), 0)
+        FROM cuotas_periodicas cp
+        JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+        WHERE gp.hogar_id = %s AND cp.pagada = TRUE
+    """, (hogar_id,))
+    total_pagado = float(cur.fetchone()[0])
+
+    # Acumulado disponible
+    acumulado_disponible = acumulado_teorico - total_pagado
 
     # Próximas cuotas pendientes
     cur.execute("""
@@ -67,8 +87,9 @@ def get_fondo(user_id: int = Depends(get_user)):
     conn.close()
 
     return {
-        "acumulado": acumulado_total,
+        "acumulado": acumulado_disponible,
         "reserva_mensual": reserva_mensual,
+        "meses_acumulados": meses,
         "cuotas_pendientes": [{
             "id": r[0],
             "nombre": r[1],
@@ -77,7 +98,7 @@ def get_fondo(user_id: int = Depends(get_user)):
             "pagada": r[4],
             "dias_restantes": r[5].days if r[5] else None,
             "alerta": r[5].days <= 30 if r[5] else False,
-            "cubierta": acumulado_total >= float(r[2])
+            "cubierta": acumulado_disponible >= float(r[2])
         } for r in cuotas]
     }
 
