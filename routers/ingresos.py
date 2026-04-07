@@ -16,9 +16,6 @@ class IngresoRequest(BaseModel):
     mes: Optional[int] = None
     anio: Optional[int] = None
 
-class EliminarIngresoRequest(BaseModel):
-    ingreso_id: int
-
 def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     user_id = decode_token(token)
@@ -26,12 +23,10 @@ def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=401, detail="No autorizado")
     return int(user_id)
 
-def get_hogar_id(cur, user_id: int):
+def get_hogar_id_opcional(cur, user_id: int):
     cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
     hogar = cur.fetchone()
-    if not hogar:
-        raise HTTPException(status_code=400, detail="No perteneces a ningún hogar")
-    return hogar[0]
+    return hogar[0] if hogar else None
 
 @router.post("/")
 def crear_ingreso(data: IngresoRequest, user_id: int = Depends(get_user)):
@@ -39,9 +34,8 @@ def crear_ingreso(data: IngresoRequest, user_id: int = Depends(get_user)):
     anio = data.anio or datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
+    hogar_id = get_hogar_id_opcional(cur, user_id)
 
-    # Ahora permitimos múltiples ingresos por mes
     cur.execute("""
         INSERT INTO ingresos (usuario_id, hogar_id, importe, descripcion, fuente, mes, anio)
         VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
@@ -56,9 +50,7 @@ def crear_ingreso(data: IngresoRequest, user_id: int = Depends(get_user)):
 def eliminar_ingreso(ingreso_id: int, user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("""
-        DELETE FROM ingresos WHERE id = %s AND usuario_id = %s
-    """, (ingreso_id, user_id))
+    cur.execute("DELETE FROM ingresos WHERE id = %s AND usuario_id = %s", (ingreso_id, user_id))
     conn.commit()
     cur.close()
     conn.close()
@@ -87,14 +79,25 @@ def get_ingresos_hogar(user_id: int = Depends(get_user)):
     anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
-    cur.execute("""
-        SELECT u.nombre, i.importe, i.descripcion, i.fuente, i.id
-        FROM ingresos i
-        JOIN usuarios u ON i.usuario_id = u.id
-        WHERE i.hogar_id = %s AND i.mes = %s AND i.anio = %s
-        ORDER BY i.id DESC
-    """, (hogar_id, mes, anio))
+    hogar_id = get_hogar_id_opcional(cur, user_id)
+
+    if hogar_id:
+        cur.execute("""
+            SELECT u.nombre, i.importe, i.descripcion, i.fuente, i.id
+            FROM ingresos i
+            JOIN usuarios u ON i.usuario_id = u.id
+            WHERE i.hogar_id = %s AND i.mes = %s AND i.anio = %s
+            ORDER BY i.id DESC
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT u.nombre, i.importe, i.descripcion, i.fuente, i.id
+            FROM ingresos i
+            JOIN usuarios u ON i.usuario_id = u.id
+            WHERE i.usuario_id = %s AND i.mes = %s AND i.anio = %s
+            ORDER BY i.id DESC
+        """, (user_id, mes, anio))
+
     rows = cur.fetchall()
     total = sum(float(r[1]) for r in rows)
     cur.close()
