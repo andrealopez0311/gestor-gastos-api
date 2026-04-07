@@ -137,44 +137,71 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     gasto = cur.fetchone()
     if not gasto:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
-
     importe = float(gasto[0])
 
-    # Verificar fondo disponible
+    # Calcular acumulado teórico del fondo
     cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM fondo_periodicos WHERE hogar_id = %s
+        SELECT COALESCE(SUM(reserva_mensual), 0)
+        FROM gastos_periodicos WHERE hogar_id = %s
     """, (hogar_id,))
-    acumulado = float(cur.fetchone()[0])
+    reserva_mensual = float(cur.fetchone()[0])
 
-    if acumulado < importe:
+    cur.execute("""
+        SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s
+    """, (hogar_id,))
+    primera_fecha = cur.fetchone()[0]
+
+    import datetime
+    hoy = datetime.date.today()
+    if primera_fecha:
+        meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1
+    else:
+        meses = 1
+
+    acumulado_teorico = reserva_mensual * meses
+
+    # Total ya pagado en cuotas
+    cur.execute("""
+        SELECT COALESCE(SUM(cp.importe), 0)
+        FROM cuotas_periodicas cp
+        JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+        WHERE gp.hogar_id = %s AND cp.pagada = TRUE
+    """, (hogar_id,))
+    total_pagado_cuotas = float(cur.fetchone()[0])
+
+    acumulado_disponible = acumulado_teorico - total_pagado_cuotas
+
+    if acumulado_disponible < importe:
         raise HTTPException(
             status_code=400,
-            detail=f"Fondo insuficiente. Acumulado: {acumulado:.2f}€, necesitas: {importe:.2f}€"
+            detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe:.2f}€"
         )
 
-    # Descontar del fondo
+    # Registrar el pago como cuota pagada
     cur.execute("""
-        UPDATE fondo_periodicos
-        SET acumulado = acumulado - %s
-        WHERE hogar_id = %s AND id = (
-            SELECT id FROM fondo_periodicos
-            WHERE hogar_id = %s ORDER BY creado_en DESC LIMIT 1
-        )
-    """, (importe, hogar_id, hogar_id))
+        INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago, pagada)
+        VALUES (%s, %s, CURRENT_DATE, TRUE)
+    """, (gasto_id, importe))
 
     # Actualizar próximo pago
     cur.execute("""
         UPDATE gastos_periodicos
-        SET acumulado = 0,
-            proximo_pago = proximo_pago + (frecuencia * INTERVAL '1 month')
+        SET proximo_pago = CASE
+            WHEN proximo_pago IS NOT NULL
+            THEN proximo_pago + (frecuencia * INTERVAL '1 month')
+            ELSE CURRENT_DATE + (frecuencia * INTERVAL '1 month')
+        END
         WHERE id = %s
     """, (gasto_id,))
 
     conn.commit()
     cur.close()
     conn.close()
-    return {"mensaje": "Pago registrado", "descontado": importe, "fondo_restante": acumulado - importe}
+    return {
+        "mensaje": "Pago registrado",
+        "descontado": importe,
+        "fondo_restante": acumulado_disponible - importe
+    }
 
 @router.delete("/{gasto_id}")
 def eliminar_gasto_periodico(gasto_id: int, user_id: int = Depends(get_user)):
