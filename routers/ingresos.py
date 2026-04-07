@@ -48,13 +48,62 @@ def crear_ingreso(data: IngresoRequest, user_id: int = Depends(get_user)):
 
 @router.delete("/{ingreso_id}")
 def eliminar_ingreso(ingreso_id: int, user_id: int = Depends(get_user)):
+    mes = datetime.date.today().month
+    anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
+
+    # Obtener importe del ingreso antes de eliminarlo
+    cur.execute("""
+        SELECT importe FROM ingresos
+        WHERE id = %s AND usuario_id = %s
+    """, (ingreso_id, user_id))
+    ingreso = cur.fetchone()
+    if not ingreso:
+        raise HTTPException(status_code=404, detail="Ingreso no encontrado")
+    importe = float(ingreso[0])
+
+    # Calcular el porcentaje de ahorro configurado
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    hogar_id = hogar[0] if hogar else None
+
+    cur.execute("""
+        SELECT porcentaje_ahorro FROM presupuesto_hogar
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    presupuesto = cur.fetchone()
+    pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
+    monto_ahorro = importe * pct_ahorro / 100
+
+    # Descontar el ahorro de los fondos
+    if hogar_id:
+        cur.execute("""
+            UPDATE ahorro
+            SET acumulado = GREATEST(0, acumulado - %s)
+            WHERE hogar_id = %s
+            AND id = (
+                SELECT id FROM ahorro WHERE hogar_id = %s
+                ORDER BY creado_en DESC LIMIT 1
+            )
+        """, (monto_ahorro, hogar_id, hogar_id))
+    else:
+        cur.execute("""
+            UPDATE ahorro
+            SET acumulado = GREATEST(0, acumulado - %s)
+            WHERE usuario_id = %s
+            AND id = (
+                SELECT id FROM ahorro WHERE usuario_id = %s
+                ORDER BY creado_en DESC LIMIT 1
+            )
+        """, (monto_ahorro, user_id, user_id))
+
+    # Eliminar el ingreso
     cur.execute("DELETE FROM ingresos WHERE id = %s AND usuario_id = %s", (ingreso_id, user_id))
     conn.commit()
     cur.close()
     conn.close()
-    return {"mensaje": "Ingreso eliminado"}
+    return {"mensaje": "Ingreso eliminado y ahorro ajustado"}
 
 @router.get("/")
 def get_mis_ingresos(user_id: int = Depends(get_user)):
