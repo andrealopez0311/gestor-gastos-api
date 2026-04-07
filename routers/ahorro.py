@@ -31,22 +31,67 @@ def get_hogar_id(cur, user_id: int):
         raise HTTPException(status_code=400, detail="No perteneces a ningún hogar")
     return hogar[0]
 
-def get_disponible_ahorro(cur, hogar_id: int, user_id: int):
+def get_disponible_ahorro(cur, hogar_id, user_id: int):
     mes = datetime.date.today().month
     anio = datetime.date.today().year
-    cur.execute("""
-        SELECT COALESCE(SUM(importe), 0)
-        FROM ingresos
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
+
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM ingresos
+            WHERE hogar_id = %s AND mes = %s AND anio = %s
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM ingresos
+            WHERE usuario_id = %s AND mes = %s AND anio = %s
+        """, (user_id, mes, anio))
     ingreso_total = float(cur.fetchone()[0])
+
     cur.execute("""
         SELECT porcentaje_ahorro FROM presupuesto_hogar
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     presupuesto = cur.fetchone()
     pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
-    return ingreso_total * pct_ahorro / 100
+
+    # Monto máximo de ahorro del mes
+    monto_ahorro_max = ingreso_total * pct_ahorro / 100
+
+    # Lo que ya se ha acumulado en fondos este mes (no voluntario)
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(cantidad), 0)
+            FROM ahorro_voluntario
+            WHERE hogar_id = %s AND mes = %s AND anio = %s
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(cantidad), 0)
+            FROM ahorro_voluntario
+            WHERE usuario_id = %s AND mes = %s AND anio = %s
+        """, (user_id, mes, anio))
+    ya_voluntario = float(cur.fetchone()[0])
+
+    # Total acumulado en fondos este mes
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM ahorro WHERE hogar_id = %s AND mes = %s AND anio = %s
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM ahorro WHERE usuario_id = %s AND mes = %s AND anio = %s
+        """, (user_id, mes, anio))
+    ya_acumulado = float(cur.fetchone()[0])
+
+    # Disponible = máximo - lo ya acumulado obligatorio (sin contar voluntario)
+    ya_obligatorio = ya_acumulado - ya_voluntario
+    disponible = monto_ahorro_max - ya_obligatorio
+
+    return max(0.0, disponible)
 
 def get_disponible_mesada(cur, user_id: int, hogar_id):
     mes = datetime.date.today().month
