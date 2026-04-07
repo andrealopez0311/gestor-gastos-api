@@ -112,14 +112,26 @@ def get_disponible_mesada(cur, user_id: int, hogar_id: int):
 def get_ahorros(user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
-    cur.execute("""
-        SELECT id, nombre, meta, acumulado, mes, anio
-        FROM ahorro WHERE hogar_id = %s
-        ORDER BY creado_en DESC
-    """, (hogar_id,))
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    hogar_id = hogar[0] if hogar else None
+
+    disponible = get_disponible_ahorro(cur, hogar_id, user_id) if hogar_id else 0.0
+
+    if hogar_id:
+        cur.execute("""
+            SELECT id, nombre, meta, acumulado, mes, anio
+            FROM ahorro WHERE hogar_id = %s
+            ORDER BY creado_en DESC
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT id, nombre, meta, acumulado, mes, anio
+            FROM ahorro WHERE usuario_id = %s
+            ORDER BY creado_en DESC
+        """, (user_id,))
+
     rows = cur.fetchall()
-    disponible = get_disponible_ahorro(cur, hogar_id, user_id)
     cur.close()
     conn.close()
     return {
@@ -141,11 +153,14 @@ def crear_ahorro(data: AhorroRequest, user_id: int = Depends(get_user)):
     anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    hogar_id = hogar[0] if hogar else None
+
     cur.execute("""
-        INSERT INTO ahorro (hogar_id, nombre, meta, mes, anio)
-        VALUES (%s, %s, %s, %s, %s) RETURNING id
-    """, (hogar_id, data.nombre, data.meta, mes, anio))
+        INSERT INTO ahorro (hogar_id, usuario_id, nombre, meta, mes, anio)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+    """, (hogar_id, user_id, data.nombre, data.meta, mes, anio))
     ahorro_id = cur.fetchone()[0]
     conn.commit()
     cur.close()
