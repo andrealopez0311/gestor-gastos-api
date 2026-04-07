@@ -68,6 +68,10 @@ def eliminar_gasto(gasto_id: int, user_id: int = Depends(get_user)):
 def resumen_mensual(user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
+    mes = datetime.date.today().month
+    anio = datetime.date.today().year
+
+    # Gastos por categoría
     cur.execute("""
         SELECT c.nombre, c.color, SUM(g.importe) as total
         FROM gastos g
@@ -78,6 +82,37 @@ def resumen_mensual(user_id: int = Depends(get_user)):
         ORDER BY total DESC
     """, (user_id,))
     rows = cur.fetchall()
+    resultado = [{"categoria": r[0], "color": r[1], "total": float(r[2])} for r in rows]
+
+    # Ahorro personal acumulado
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM ahorro_personal WHERE usuario_id = %s
+    """, (user_id,))
+    ahorro_personal = float(cur.fetchone()[0])
+
+    # Ahorro voluntario del mes
+    cur.execute("""
+        SELECT COALESCE(SUM(cantidad), 0)
+        FROM ahorro_voluntario
+        WHERE usuario_id = %s AND mes = %s AND anio = %s
+    """, (user_id, mes, anio))
+    ahorro_voluntario = float(cur.fetchone()[0])
+
+    if ahorro_personal > 0:
+        resultado.append({
+            "categoria": "Ahorro Personal",
+            "color": "#1E88E5",
+            "total": ahorro_personal
+        })
+
+    if ahorro_voluntario > 0:
+        resultado.append({
+            "categoria": "Ahorro Hogar",
+            "color": "#43A047",
+            "total": ahorro_voluntario
+        })
+
     cur.close()
     conn.close()
-    return [{"categoria": r[0], "color": r[1], "total": float(r[2])} for r in rows]
+    return resultado
