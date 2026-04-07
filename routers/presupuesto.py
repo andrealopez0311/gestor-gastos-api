@@ -20,12 +20,10 @@ def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=401, detail="No autorizado")
     return int(user_id)
 
-def get_hogar_id(cur, user_id: int):
+def get_hogar_id_opcional(cur, user_id: int):
     cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
     hogar = cur.fetchone()
-    if not hogar:
-        raise HTTPException(status_code=400, detail="No perteneces a ningún hogar")
-    return hogar[0]
+    return hogar[0] if hogar else None
 
 @router.post("/")
 def crear_presupuesto(data: PresupuestoRequest, user_id: int = Depends(get_user)):
@@ -35,10 +33,10 @@ def crear_presupuesto(data: PresupuestoRequest, user_id: int = Depends(get_user)
     anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
+    hogar_id = get_hogar_id_opcional(cur, user_id)
     cur.execute("""
         SELECT id FROM presupuesto_hogar
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     existente = cur.fetchone()
     if existente:
@@ -65,11 +63,11 @@ def get_presupuesto(user_id: int = Depends(get_user)):
     anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
+    hogar_id = get_hogar_id_opcional(cur, user_id)
     cur.execute("""
         SELECT porcentaje_ahorro, porcentaje_comunes, porcentaje_personal
         FROM presupuesto_hogar
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     row = cur.fetchone()
     cur.close()
@@ -84,58 +82,66 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
+    hogar_id = get_hogar_id_opcional(cur, user_id)
 
-    # Ingresos totales del hogar
-    cur.execute("""
-        SELECT COALESCE(SUM(importe), 0)
-        FROM ingresos
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
+    # Ingresos totales
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM ingresos
+            WHERE hogar_id = %s AND mes = %s AND anio = %s
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM ingresos
+            WHERE usuario_id = %s AND mes = %s AND anio = %s
+        """, (user_id, mes, anio))
     ingreso_total = float(cur.fetchone()[0])
 
-    # Presupuesto del hogar
+    # Presupuesto
     cur.execute("""
         SELECT porcentaje_ahorro
         FROM presupuesto_hogar
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     presupuesto = cur.fetchone()
     pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
 
-    # Calcular ahorro
     monto_ahorro = ingreso_total * pct_ahorro / 100
     tras_ahorro = ingreso_total - monto_ahorro
 
-    # Total gastos comunes reales del mes
-    cur.execute("""
-        SELECT COALESCE(SUM(importe), 0)
-        FROM gastos_comunes
-        WHERE hogar_id = %s
-        AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
-    """, (hogar_id,))
-    gastos_comunes_real = float(cur.fetchone()[0])
+    # Gastos comunes y periódicos
+    gastos_comunes_real = 0.0
+    total_periodicos = 0.0
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM gastos_comunes
+            WHERE hogar_id = %s
+            AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+        """, (hogar_id,))
+        gastos_comunes_real = float(cur.fetchone()[0])
 
-    # Total reserva periódicos
-    cur.execute("""
-        SELECT COALESCE(SUM(reserva_mensual), 0)
-        FROM gastos_periodicos
-        WHERE hogar_id = %s
-    """, (hogar_id,))
-    total_periodicos = float(cur.fetchone()[0])
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+        total_periodicos = float(cur.fetchone()[0])
 
-    # Total egresos = gastos comunes + periódicos
     total_egresos = gastos_comunes_real + total_periodicos
-
-    # Disponible para mesada
     disponible_mesada = tras_ahorro - total_egresos
 
     # Número de miembros
-    cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
-    num_miembros = cur.fetchone()[0]
+    if hogar_id:
+        cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
+        num_miembros = cur.fetchone()[0]
+    else:
+        num_miembros = 1
+
     mesada_por_miembro = disponible_mesada / num_miembros if num_miembros > 0 else disponible_mesada
 
-    # Gastos personales del usuario este mes
+    # Gastos personales
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0)
         FROM gastos
@@ -144,15 +150,14 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     """, (user_id,))
     gastos_personales = float(cur.fetchone()[0])
 
-    # Ahorro personal acumulado
+    # Ahorro personal
     cur.execute("""
         SELECT COALESCE(SUM(acumulado), 0)
-        FROM ahorro_personal
-        WHERE usuario_id = %s
+        FROM ahorro_personal WHERE usuario_id = %s
     """, (user_id,))
     ahorro_personal = float(cur.fetchone()[0])
 
-    # Ahorro voluntario del mes
+    # Ahorro voluntario
     cur.execute("""
         SELECT COALESCE(SUM(cantidad), 0)
         FROM ahorro_voluntario
@@ -160,17 +165,17 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     """, (user_id, mes, anio))
     ahorro_voluntario = float(cur.fetchone()[0])
 
-    # Total descontado de la mesada
     total_descontado_mesada = gastos_personales + ahorro_personal + ahorro_voluntario
     disponible_personal = mesada_por_miembro - total_descontado_mesada
 
     # Ahorro acumulado en fondos familiares
-    cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM ahorro
-        WHERE hogar_id = %s
-    """, (hogar_id,))
-    ahorro_acumulado = float(cur.fetchone()[0])
+    ahorro_acumulado = 0.0
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM ahorro WHERE hogar_id = %s
+        """, (hogar_id,))
+        ahorro_acumulado = float(cur.fetchone()[0])
 
     cur.close()
     conn.close()
@@ -178,9 +183,7 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     return {
         "ingreso_total": ingreso_total,
         "num_miembros": num_miembros,
-        "presupuesto": {
-            "pct_ahorro": pct_ahorro
-        },
+        "presupuesto": {"pct_ahorro": pct_ahorro},
         "montos": {
             "ahorro": monto_ahorro,
             "tras_ahorro": tras_ahorro,
