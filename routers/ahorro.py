@@ -161,23 +161,19 @@ def actualizar_ahorro(ahorro_id: int, data: ActualizarAhorroRequest, user_id: in
     hogar_id = get_hogar_id(cur, user_id)
 
     if not data.es_voluntario:
-    # Verificar si ya se alcanzó el límite del 20%
-    disponible_ahorro = get_disponible_ahorro(cur, hogar_id, user_id)
-    if data.cantidad > disponible_ahorro:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Ya alcanzaste el límite de ahorro del mes. Disponible: {disponible_ahorro:.2f}€. Si quieres ahorrar más usa ahorro voluntario de tu mesada."
-        )
-
-    if data.es_voluntario:
-        # Validar que hay mesada disponible
+        disponible_ahorro = get_disponible_ahorro(cur, hogar_id, user_id)
+        if data.cantidad > disponible_ahorro:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ya alcanzaste el límite de ahorro del mes. Disponible: {disponible_ahorro:.2f}€. Si quieres ahorrar más usa ahorro voluntario."
+            )
+    else:
         disponible_mesada = get_disponible_mesada(cur, user_id, hogar_id)
         if data.cantidad > disponible_mesada:
             raise HTTPException(
                 status_code=400,
                 detail=f"No tienes suficiente mesada disponible. Disponible: {disponible_mesada:.2f}€"
             )
-        # Registrar ahorro voluntario para descontarlo de la mesada
         cur.execute("""
             INSERT INTO ahorro_voluntario (usuario_id, hogar_id, fondo_id, cantidad, mes, anio)
             VALUES (%s, %s, %s, %s, %s, %s)
