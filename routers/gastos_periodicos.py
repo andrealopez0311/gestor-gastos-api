@@ -119,35 +119,62 @@ def acumular_reserva(gasto_id: int, user_id: int = Depends(get_user)):
         "listo": float(row[0]) >= float(row[1])
     }
 
-@router.put("/{gasto_id}/pagar")
+@router.post("/{gasto_id}/pagar")
 def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    if not hogar:
+        raise HTTPException(status_code=400, detail="No perteneces a ningún hogar")
+    hogar_id = hogar[0]
+
+    # Obtener importe del gasto periódico
     cur.execute("""
-        SELECT frecuencia, proximo_pago FROM gastos_periodicos
+        SELECT importe, nombre FROM gastos_periodicos
         WHERE id = %s AND hogar_id = %s
     """, (gasto_id, hogar_id))
-    row = cur.fetchone()
-    if not row:
+    gasto = cur.fetchone()
+    if not gasto:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
 
-    frecuencia = row[0]
-    proximo = row[1] or datetime.date.today()
-    nuevo_proximo = proximo + datetime.timedelta(days=frecuencia * 30)
+    importe = float(gasto[0])
 
+    # Verificar fondo disponible
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM fondo_periodicos WHERE hogar_id = %s
+    """, (hogar_id,))
+    acumulado = float(cur.fetchone()[0])
+
+    if acumulado < importe:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fondo insuficiente. Acumulado: {acumulado:.2f}€, necesitas: {importe:.2f}€"
+        )
+
+    # Descontar del fondo
+    cur.execute("""
+        UPDATE fondo_periodicos
+        SET acumulado = acumulado - %s
+        WHERE hogar_id = %s AND id = (
+            SELECT id FROM fondo_periodicos
+            WHERE hogar_id = %s ORDER BY creado_en DESC LIMIT 1
+        )
+    """, (importe, hogar_id, hogar_id))
+
+    # Actualizar próximo pago
     cur.execute("""
         UPDATE gastos_periodicos
-        SET acumulado = 0, proximo_pago = %s
-        WHERE id = %s AND hogar_id = %s
-    """, (nuevo_proximo, gasto_id, hogar_id))
+        SET acumulado = 0,
+            proximo_pago = proximo_pago + (frecuencia * INTERVAL '1 month')
+        WHERE id = %s
+    """, (gasto_id,))
+
     conn.commit()
     cur.close()
     conn.close()
-    return {
-        "mensaje": "Pago registrado",
-        "proximo_pago": str(nuevo_proximo)
-    }
+    return {"mensaje": "Pago registrado", "descontado": importe, "fondo_restante": acumulado - importe}
 
 @router.delete("/{gasto_id}")
 def eliminar_gasto_periodico(gasto_id: int, user_id: int = Depends(get_user)):
