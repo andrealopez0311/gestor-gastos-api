@@ -152,8 +152,16 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     """, (user_id,))
     ahorro_personal = float(cur.fetchone()[0])
 
+    # Ahorro voluntario del mes
+    cur.execute("""
+        SELECT COALESCE(SUM(cantidad), 0)
+        FROM ahorro_voluntario
+        WHERE usuario_id = %s AND mes = %s AND anio = %s
+    """, (user_id, mes, anio))
+    ahorro_voluntario = float(cur.fetchone()[0])
+
     # Total descontado de la mesada
-    total_descontado_mesada = gastos_personales + ahorro_personal
+    total_descontado_mesada = gastos_personales + ahorro_personal + ahorro_voluntario
     disponible_personal = mesada_por_miembro - total_descontado_mesada
 
     # Ahorro acumulado en fondos familiares
@@ -186,6 +194,7 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
             "mesada": mesada_por_miembro,
             "gastado": gastos_personales,
             "ahorro_personal": ahorro_personal,
+            "ahorro_voluntario": ahorro_voluntario,
             "total_descontado": total_descontado_mesada,
             "disponible": disponible_personal
         },
