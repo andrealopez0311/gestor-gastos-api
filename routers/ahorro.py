@@ -34,6 +34,36 @@ def get_disponible_ahorro(cur, hogar_id: int, user_id: int):
     mes = datetime.date.today().month
     anio = datetime.date.today().year
 
+    # Ingresos totales del mes
+    cur.execute("""
+        SELECT COALESCE(SUM(importe), 0)
+        FROM ingresos
+        WHERE hogar_id = %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    ingreso_total = float(cur.fetchone()[0])
+
+    # Porcentaje de ahorro
+    cur.execute("""
+        SELECT porcentaje_ahorro FROM presupuesto_hogar
+        WHERE hogar_id = %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    presupuesto = cur.fetchone()
+    pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
+
+    # Monto destinado a ahorro este mes
+    monto_ahorro = ingreso_total * pct_ahorro / 100
+
+    # Lo acumulado en fondos ESTE MES (no históricamente)
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM ahorro
+        WHERE hogar_id = %s
+        AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    ya_acumulado = float(cur.fetchone()[0])
+
+    return monto_ahorro - ya_acumulado
+
     # Ingresos totales
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0)
