@@ -15,6 +15,7 @@ class AhorroRequest(BaseModel):
 
 class ActualizarAhorroRequest(BaseModel):
     cantidad: float
+    es_voluntario: bool = False
 
 def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
@@ -33,16 +34,30 @@ def get_hogar_id(cur, user_id: int):
 def get_disponible_ahorro(cur, hogar_id: int, user_id: int):
     mes = datetime.date.today().month
     anio = datetime.date.today().year
-
-    # Ingresos totales del mes
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0)
         FROM ingresos
         WHERE hogar_id = %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     ingreso_total = float(cur.fetchone()[0])
+    cur.execute("""
+        SELECT porcentaje_ahorro FROM presupuesto_hogar
+        WHERE hogar_id = %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    presupuesto = cur.fetchone()
+    pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
+    return ingreso_total * pct_ahorro / 100
 
-    # Porcentaje de ahorro
+def get_disponible_mesada(cur, user_id: int, hogar_id: int):
+    mes = datetime.date.today().month
+    anio = datetime.date.today().year
+
+    cur.execute("""
+        SELECT COALESCE(SUM(importe), 0)
+        FROM ingresos WHERE hogar_id = %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    ingreso_total = float(cur.fetchone()[0])
+
     cur.execute("""
         SELECT porcentaje_ahorro FROM presupuesto_hogar
         WHERE hogar_id = %s AND mes = %s AND anio = %s
@@ -50,38 +65,48 @@ def get_disponible_ahorro(cur, hogar_id: int, user_id: int):
     presupuesto = cur.fetchone()
     pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
 
-    # Monto destinado a ahorro este mes
     monto_ahorro = ingreso_total * pct_ahorro / 100
+    tras_ahorro = ingreso_total - monto_ahorro
 
-    return monto_ahorro
-
-    # Ingresos totales
     cur.execute("""
-        SELECT COALESCE(SUM(importe), 0)
-        FROM ingresos
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
-    ingreso_total = float(cur.fetchone()[0])
+        SELECT COALESCE(SUM(importe), 0) FROM gastos_comunes
+        WHERE hogar_id = %s
+        AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+    """, (hogar_id,))
+    gastos_comunes = float(cur.fetchone()[0])
 
-    # Porcentaje de ahorro
     cur.execute("""
-        SELECT porcentaje_ahorro FROM presupuesto_hogar
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
-    presupuesto = cur.fetchone()
-    pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
+        SELECT COALESCE(SUM(reserva_mensual), 0)
+        FROM gastos_periodicos WHERE hogar_id = %s
+    """, (hogar_id,))
+    periodicos = float(cur.fetchone()[0])
 
-    # Monto destinado a ahorro
-    monto_ahorro = ingreso_total * pct_ahorro / 100
+    cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
+    num_miembros = cur.fetchone()[0]
 
-    # Lo que ya está acumulado en fondos este mes
+    mesada = (tras_ahorro - gastos_comunes - periodicos) / num_miembros if num_miembros > 0 else 0
+
+    cur.execute("""
+        SELECT COALESCE(SUM(importe), 0) FROM gastos
+        WHERE usuario_id = %s
+        AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+    """, (user_id,))
+    gastos_personales = float(cur.fetchone()[0])
+
     cur.execute("""
         SELECT COALESCE(SUM(acumulado), 0)
-        FROM ahorro WHERE hogar_id = %s
-    """, (hogar_id,))
-    ya_acumulado = float(cur.fetchone()[0])
+        FROM ahorro_personal WHERE usuario_id = %s
+    """, (user_id,))
+    ahorro_personal = float(cur.fetchone()[0])
 
-    return monto_ahorro - ya_acumulado
+    cur.execute("""
+        SELECT COALESCE(SUM(cantidad), 0)
+        FROM ahorro_voluntario
+        WHERE usuario_id = %s AND mes = %s AND anio = %s
+    """, (user_id, mes, anio))
+    ahorro_voluntario = float(cur.fetchone()[0])
+
+    return mesada - gastos_personales - ahorro_personal - ahorro_voluntario
 
 @router.get("/")
 def get_ahorros(user_id: int = Depends(get_user)):
@@ -90,14 +115,11 @@ def get_ahorros(user_id: int = Depends(get_user)):
     hogar_id = get_hogar_id(cur, user_id)
     cur.execute("""
         SELECT id, nombre, meta, acumulado, mes, anio
-        FROM ahorro
-        WHERE hogar_id = %s
+        FROM ahorro WHERE hogar_id = %s
         ORDER BY creado_en DESC
     """, (hogar_id,))
     rows = cur.fetchall()
-
     disponible = get_disponible_ahorro(cur, hogar_id, user_id)
-
     cur.close()
     conn.close()
     return {
@@ -132,30 +154,37 @@ def crear_ahorro(data: AhorroRequest, user_id: int = Depends(get_user)):
 
 @router.put("/{ahorro_id}")
 def actualizar_ahorro(ahorro_id: int, data: ActualizarAhorroRequest, user_id: int = Depends(get_user)):
+    mes = datetime.date.today().month
+    anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
     hogar_id = get_hogar_id(cur, user_id)
 
-    # Validar que hay suficiente disponible para ahorrar
-    disponible = get_disponible_ahorro(cur, hogar_id, user_id)
-    if data.cantidad > disponible:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No puedes ahorrar más de lo disponible. Disponible: {disponible:.2f}€"
-        )
+    if data.es_voluntario:
+        # Validar que hay mesada disponible
+        disponible_mesada = get_disponible_mesada(cur, user_id, hogar_id)
+        if data.cantidad > disponible_mesada:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No tienes suficiente mesada disponible. Disponible: {disponible_mesada:.2f}€"
+            )
+        # Registrar ahorro voluntario para descontarlo de la mesada
+        cur.execute("""
+            INSERT INTO ahorro_voluntario (usuario_id, hogar_id, fondo_id, cantidad, mes, anio)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (user_id, hogar_id, ahorro_id, data.cantidad, mes, anio))
 
     cur.execute("""
-        UPDATE ahorro
-        SET acumulado = acumulado + %s
+        UPDATE ahorro SET acumulado = acumulado + %s
         WHERE id = %s AND hogar_id = %s
         RETURNING acumulado, meta
     """, (data.cantidad, ahorro_id, hogar_id))
     row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Fondo no encontrado")
     conn.commit()
     cur.close()
     conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Fondo no encontrado")
     return {
         "mensaje": "Ahorro actualizado",
         "acumulado": float(row[0]),
@@ -167,9 +196,7 @@ def eliminar_ahorro(ahorro_id: int, user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
     hogar_id = get_hogar_id(cur, user_id)
-    cur.execute("""
-        DELETE FROM ahorro WHERE id = %s AND hogar_id = %s
-    """, (ahorro_id, hogar_id))
+    cur.execute("DELETE FROM ahorro WHERE id = %s AND hogar_id = %s", (ahorro_id, hogar_id))
     conn.commit()
     cur.close()
     conn.close()
