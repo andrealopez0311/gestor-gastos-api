@@ -53,16 +53,7 @@ def get_disponible_ahorro(cur, hogar_id: int, user_id: int):
     # Monto destinado a ahorro este mes
     monto_ahorro = ingreso_total * pct_ahorro / 100
 
-    # Lo acumulado en fondos ESTE MES (no históricamente)
-    cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM ahorro
-        WHERE hogar_id = %s
-        AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
-    ya_acumulado = float(cur.fetchone()[0])
-
-    return monto_ahorro - ya_acumulado
+    return monto_ahorro
 
     # Ingresos totales
     cur.execute("""
