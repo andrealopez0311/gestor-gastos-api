@@ -15,7 +15,6 @@ class AhorroRequest(BaseModel):
 
 class ActualizarAhorroRequest(BaseModel):
     cantidad: float
-    fondo_id: int
 
 def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
