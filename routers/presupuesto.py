@@ -144,10 +144,19 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     """, (user_id,))
     gastos_personales = float(cur.fetchone()[0])
 
-    # Disponible personal
-    disponible_personal = mesada_por_miembro - gastos_personales
+    # Ahorro personal acumulado
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM ahorro_personal
+        WHERE usuario_id = %s
+    """, (user_id,))
+    ahorro_personal = float(cur.fetchone()[0])
 
-    # Ahorro acumulado en fondos
+    # Total descontado de la mesada
+    total_descontado_mesada = gastos_personales + ahorro_personal
+    disponible_personal = mesada_por_miembro - total_descontado_mesada
+
+    # Ahorro acumulado en fondos familiares
     cur.execute("""
         SELECT COALESCE(SUM(acumulado), 0)
         FROM ahorro
@@ -176,6 +185,8 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
         "personal": {
             "mesada": mesada_por_miembro,
             "gastado": gastos_personales,
+            "ahorro_personal": ahorro_personal,
+            "total_descontado": total_descontado_mesada,
             "disponible": disponible_personal
         },
         "ahorro_acumulado": ahorro_acumulado
