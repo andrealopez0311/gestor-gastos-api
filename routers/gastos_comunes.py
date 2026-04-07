@@ -96,3 +96,40 @@ def resumen_gastos_comunes(user_id: int = Depends(get_user)):
     cur.close()
     conn.close()
     return [{"categoria": r[0], "color": r[1], "total": float(r[2])} for r in rows]
+
+class EditarGastoComunRequest(BaseModel):
+    descripcion: Optional[str] = None
+    importe: Optional[float] = None
+    fecha: Optional[str] = None
+    categoria_id: Optional[int] = None
+
+@router.put("/{gasto_id}")
+def editar_gasto_comun(gasto_id: int, data: EditarGastoComunRequest, user_id: int = Depends(get_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    hogar_id = get_hogar_id(cur, user_id)
+
+    # Obtener gasto actual
+    cur.execute("""
+        SELECT descripcion, importe, fecha, categoria_id
+        FROM gastos_comunes WHERE id = %s AND hogar_id = %s
+    """, (gasto_id, hogar_id))
+    actual = cur.fetchone()
+    if not actual:
+        raise HTTPException(status_code=404, detail="Gasto no encontrado")
+
+    # Usar valores actuales si no se mandan nuevos
+    descripcion = data.descripcion if data.descripcion is not None else actual[0]
+    importe = data.importe if data.importe is not None else float(actual[1])
+    fecha = data.fecha if data.fecha is not None else str(actual[2])
+    categoria_id = data.categoria_id if data.categoria_id is not None else actual[3]
+
+    cur.execute("""
+        UPDATE gastos_comunes
+        SET descripcion = %s, importe = %s, fecha = %s, categoria_id = %s
+        WHERE id = %s AND hogar_id = %s
+    """, (descripcion, importe, fecha, categoria_id, gasto_id, hogar_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"mensaje": "Gasto común actualizado"}

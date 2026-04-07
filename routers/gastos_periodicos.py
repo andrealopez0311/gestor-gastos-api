@@ -262,3 +262,38 @@ def resumen_con_periodicos(user_id: int = Depends(get_user)):
         },
         "alerta_periodicos": alerta_periodicos
     }
+
+class EditarGastoPeriodicoRequest(BaseModel):
+    nombre: Optional[str] = None
+    importe: Optional[float] = None
+    frecuencia: Optional[int] = None
+    proximo_pago: Optional[str] = None
+
+@router.put("/{gasto_id}")
+def editar_gasto_periodico(gasto_id: int, data: EditarGastoPeriodicoRequest, user_id: int = Depends(get_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    hogar_id = get_hogar_id(cur, user_id)
+
+    cur.execute("""
+        SELECT nombre, importe, frecuencia, proximo_pago
+        FROM gastos_periodicos WHERE id = %s AND hogar_id = %s
+    """, (gasto_id, hogar_id))
+    actual = cur.fetchone()
+    if not actual:
+        raise HTTPException(status_code=404, detail="Gasto no encontrado")
+
+    nombre = data.nombre if data.nombre is not None else actual[0]
+    importe = data.importe if data.importe is not None else float(actual[1])
+    frecuencia = data.frecuencia if data.frecuencia is not None else actual[2]
+    proximo_pago = data.proximo_pago if data.proximo_pago is not None else str(actual[3]) if actual[3] else None
+
+    cur.execute("""
+        UPDATE gastos_periodicos
+        SET nombre = %s, importe = %s, frecuencia = %s, proximo_pago = %s
+        WHERE id = %s AND hogar_id = %s
+    """, (nombre, importe, frecuencia, proximo_pago, gasto_id, hogar_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"mensaje": "Gasto periódico actualizado"}
