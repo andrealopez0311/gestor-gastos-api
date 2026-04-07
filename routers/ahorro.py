@@ -173,32 +173,45 @@ def actualizar_ahorro(ahorro_id: int, data: ActualizarAhorroRequest, user_id: in
     anio = datetime.date.today().year
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
+
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    hogar_id = hogar[0] if hogar else None
 
     if not data.es_voluntario:
-        disponible_ahorro = get_disponible_ahorro(cur, hogar_id, user_id)
+        disponible_ahorro = get_disponible_ahorro(cur, hogar_id, user_id) if hogar_id else 999999.0
         if data.cantidad > disponible_ahorro:
             raise HTTPException(
                 status_code=400,
-                detail=f"Ya alcanzaste el límite de ahorro del mes. Disponible: {disponible_ahorro:.2f}€. Si quieres ahorrar más usa ahorro voluntario."
+                detail=f"Ya alcanzaste el límite de ahorro del mes. Disponible: {disponible_ahorro:.2f}€."
             )
     else:
-        disponible_mesada = get_disponible_mesada(cur, user_id, hogar_id)
-        if data.cantidad > disponible_mesada:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No tienes suficiente mesada disponible. Disponible: {disponible_mesada:.2f}€"
-            )
-        cur.execute("""
-            INSERT INTO ahorro_voluntario (usuario_id, hogar_id, fondo_id, cantidad, mes, anio)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (user_id, hogar_id, ahorro_id, data.cantidad, mes, anio))
+        if hogar_id:
+            disponible_mesada = get_disponible_mesada(cur, user_id, hogar_id)
+            if data.cantidad > disponible_mesada:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No tienes suficiente mesada disponible. Disponible: {disponible_mesada:.2f}€"
+                )
+            cur.execute("""
+                INSERT INTO ahorro_voluntario (usuario_id, hogar_id, fondo_id, cantidad, mes, anio)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (user_id, hogar_id, ahorro_id, data.cantidad, mes, anio))
 
-    cur.execute("""
-        UPDATE ahorro SET acumulado = acumulado + %s
-        WHERE id = %s AND hogar_id = %s
-        RETURNING acumulado, meta
-    """, (data.cantidad, ahorro_id, hogar_id))
+    # Verificar que el fondo pertenece al usuario o su hogar
+    if hogar_id:
+        cur.execute("""
+            UPDATE ahorro SET acumulado = acumulado + %s
+            WHERE id = %s AND hogar_id = %s
+            RETURNING acumulado, meta
+        """, (data.cantidad, ahorro_id, hogar_id))
+    else:
+        cur.execute("""
+            UPDATE ahorro SET acumulado = acumulado + %s
+            WHERE id = %s AND usuario_id = %s
+            RETURNING acumulado, meta
+        """, (data.cantidad, ahorro_id, user_id))
+
     row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Fondo no encontrado")
