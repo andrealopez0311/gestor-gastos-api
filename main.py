@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from routers import usuarios, gastos, categorias, hogares, ingresos, presupuesto, gastos_comunes, ahorro, gastos_periodicos, egresos, ahorro_personal
+from routers import usuarios, gastos, categorias, hogares, ingresos, presupuesto, gastos_comunes, ahorro, gastos_periodicos, egresos, ahorro_personal, fondo_periodicos
 
 app = FastAPI(title="Gestor de Gastos API", version="3.0.0")
 
@@ -14,6 +14,7 @@ app.include_router(ahorro.router)
 app.include_router(gastos_periodicos.router)
 app.include_router(egresos.router)
 app.include_router(ahorro_personal.router)
+app.include_router(fondo_periodicos.router)
 
 @app.get("/")
 def root():
