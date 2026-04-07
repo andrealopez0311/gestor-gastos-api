@@ -48,19 +48,25 @@ def get_disponible_ahorro(cur, hogar_id: int, user_id: int):
     pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
     return ingreso_total * pct_ahorro / 100
 
-def get_disponible_mesada(cur, user_id: int, hogar_id: int):
+def get_disponible_mesada(cur, user_id: int, hogar_id):
     mes = datetime.date.today().month
     anio = datetime.date.today().year
 
-    cur.execute("""
-        SELECT COALESCE(SUM(importe), 0)
-        FROM ingresos WHERE hogar_id = %s AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM ingresos WHERE hogar_id = %s AND mes = %s AND anio = %s
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM ingresos WHERE usuario_id = %s AND mes = %s AND anio = %s
+        """, (user_id, mes, anio))
     ingreso_total = float(cur.fetchone()[0])
 
     cur.execute("""
         SELECT porcentaje_ahorro FROM presupuesto_hogar
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     presupuesto = cur.fetchone()
     pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
@@ -68,21 +74,37 @@ def get_disponible_mesada(cur, user_id: int, hogar_id: int):
     monto_ahorro = ingreso_total * pct_ahorro / 100
     tras_ahorro = ingreso_total - monto_ahorro
 
-    cur.execute("""
-        SELECT COALESCE(SUM(importe), 0) FROM gastos_comunes
-        WHERE hogar_id = %s
-        AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
-    """, (hogar_id,))
-    gastos_comunes = float(cur.fetchone()[0])
+    gastos_comunes = 0.0
+    periodicos = 0.0
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0) FROM gastos_comunes
+            WHERE hogar_id = %s
+            AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+        """, (hogar_id,))
+        gastos_comunes = float(cur.fetchone()[0])
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+        periodicos = float(cur.fetchone()[0])
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0) FROM gastos_comunes
+            WHERE usuario_id = %s AND hogar_id IS NULL
+            AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+        """, (user_id,))
+        gastos_comunes = float(cur.fetchone()[0])
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
+        periodicos = float(cur.fetchone()[0])
 
-    cur.execute("""
-        SELECT COALESCE(SUM(reserva_mensual), 0)
-        FROM gastos_periodicos WHERE hogar_id = %s
-    """, (hogar_id,))
-    periodicos = float(cur.fetchone()[0])
-
-    cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
-    num_miembros = cur.fetchone()[0]
+    num_miembros = 1
+    if hogar_id:
+        cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
+        num_miembros = cur.fetchone()[0]
 
     mesada = (tras_ahorro - gastos_comunes - periodicos) / num_miembros if num_miembros > 0 else 0
 
@@ -186,19 +208,17 @@ def actualizar_ahorro(ahorro_id: int, data: ActualizarAhorroRequest, user_id: in
                 detail=f"Ya alcanzaste el límite de ahorro del mes. Disponible: {disponible_ahorro:.2f}€."
             )
     else:
-        if hogar_id:
-            disponible_mesada = get_disponible_mesada(cur, user_id, hogar_id)
-            if data.cantidad > disponible_mesada:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"No tienes suficiente mesada disponible. Disponible: {disponible_mesada:.2f}€"
-                )
-            cur.execute("""
-                INSERT INTO ahorro_voluntario (usuario_id, hogar_id, fondo_id, cantidad, mes, anio)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (user_id, hogar_id, ahorro_id, data.cantidad, mes, anio))
+        disponible_mesada = get_disponible_mesada(cur, user_id, hogar_id)
+        if data.cantidad > disponible_mesada:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No tienes suficiente mesada disponible. Disponible: {disponible_mesada:.2f}€"
+            )
+        cur.execute("""
+            INSERT INTO ahorro_voluntario (usuario_id, hogar_id, fondo_id, cantidad, mes, anio)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (user_id, hogar_id, ahorro_id, data.cantidad, mes, anio))
 
-    # Verificar que el fondo pertenece al usuario o su hogar
     if hogar_id:
         cur.execute("""
             UPDATE ahorro SET acumulado = acumulado + %s
