@@ -15,6 +15,7 @@ class AhorroRequest(BaseModel):
 
 class ActualizarAhorroRequest(BaseModel):
     cantidad: float
+    fondo_id: int
 
 def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
@@ -30,6 +31,38 @@ def get_hogar_id(cur, user_id: int):
         raise HTTPException(status_code=400, detail="No perteneces a ningún hogar")
     return hogar[0]
 
+def get_disponible_ahorro(cur, hogar_id: int, user_id: int):
+    mes = datetime.date.today().month
+    anio = datetime.date.today().year
+
+    # Ingresos totales
+    cur.execute("""
+        SELECT COALESCE(SUM(importe), 0)
+        FROM ingresos
+        WHERE hogar_id = %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    ingreso_total = float(cur.fetchone()[0])
+
+    # Porcentaje de ahorro
+    cur.execute("""
+        SELECT porcentaje_ahorro FROM presupuesto_hogar
+        WHERE hogar_id = %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    presupuesto = cur.fetchone()
+    pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
+
+    # Monto destinado a ahorro
+    monto_ahorro = ingreso_total * pct_ahorro / 100
+
+    # Lo que ya está acumulado en fondos este mes
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM ahorro WHERE hogar_id = %s
+    """, (hogar_id,))
+    ya_acumulado = float(cur.fetchone()[0])
+
+    return monto_ahorro - ya_acumulado
+
 @router.get("/")
 def get_ahorros(user_id: int = Depends(get_user)):
     conn = get_connection()
@@ -42,17 +75,23 @@ def get_ahorros(user_id: int = Depends(get_user)):
         ORDER BY creado_en DESC
     """, (hogar_id,))
     rows = cur.fetchall()
+
+    disponible = get_disponible_ahorro(cur, hogar_id, user_id)
+
     cur.close()
     conn.close()
-    return [{
-        "id": r[0],
-        "nombre": r[1],
-        "meta": float(r[2]) if r[2] else None,
-        "acumulado": float(r[3]),
-        "progreso": round(float(r[3]) / float(r[2]) * 100, 1) if r[2] and float(r[2]) > 0 else 0,
-        "mes": r[4],
-        "anio": r[5]
-    } for r in rows]
+    return {
+        "disponible_para_ahorrar": disponible,
+        "fondos": [{
+            "id": r[0],
+            "nombre": r[1],
+            "meta": float(r[2]) if r[2] else None,
+            "acumulado": float(r[3]),
+            "progreso": round(float(r[3]) / float(r[2]) * 100, 1) if r[2] and float(r[2]) > 0 else 0,
+            "mes": r[4],
+            "anio": r[5]
+        } for r in rows]
+    }
 
 @router.post("/")
 def crear_ahorro(data: AhorroRequest, user_id: int = Depends(get_user)):
@@ -76,15 +115,32 @@ def actualizar_ahorro(ahorro_id: int, data: ActualizarAhorroRequest, user_id: in
     conn = get_connection()
     cur = conn.cursor()
     hogar_id = get_hogar_id(cur, user_id)
+
+    # Validar que hay suficiente disponible para ahorrar
+    disponible = get_disponible_ahorro(cur, hogar_id, user_id)
+    if data.cantidad > disponible:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No puedes ahorrar más de lo disponible. Disponible: {disponible:.2f}€"
+        )
+
     cur.execute("""
         UPDATE ahorro
         SET acumulado = acumulado + %s
         WHERE id = %s AND hogar_id = %s
+        RETURNING acumulado, meta
     """, (data.cantidad, ahorro_id, hogar_id))
+    row = cur.fetchone()
     conn.commit()
     cur.close()
     conn.close()
-    return {"mensaje": "Ahorro actualizado"}
+    if not row:
+        raise HTTPException(status_code=404, detail="Fondo no encontrado")
+    return {
+        "mensaje": "Ahorro actualizado",
+        "acumulado": float(row[0]),
+        "listo": float(row[0]) >= float(row[1]) if row[1] else False
+    }
 
 @router.delete("/{ahorro_id}")
 def eliminar_ahorro(ahorro_id: int, user_id: int = Depends(get_user)):
@@ -98,3 +154,13 @@ def eliminar_ahorro(ahorro_id: int, user_id: int = Depends(get_user)):
     cur.close()
     conn.close()
     return {"mensaje": "Fondo de ahorro eliminado"}
+
+@router.get("/disponible")
+def get_disponible(user_id: int = Depends(get_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    hogar_id = get_hogar_id(cur, user_id)
+    disponible = get_disponible_ahorro(cur, hogar_id, user_id)
+    cur.close()
+    conn.close()
+    return {"disponible_para_ahorrar": disponible}

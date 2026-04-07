@@ -29,8 +29,7 @@ def get_hogar_id(cur, user_id: int):
 
 @router.post("/")
 def crear_presupuesto(data: PresupuestoRequest, user_id: int = Depends(get_user)):
-    total = data.porcentaje_ahorro + data.porcentaje_comunes + data.porcentaje_personal
-    if abs(total - 100.0) > 0.01:
+    if abs(data.porcentaje_ahorro + data.porcentaje_comunes + data.porcentaje_personal - 100.0) > 0.01:
         raise HTTPException(status_code=400, detail="Los porcentajes deben sumar 100")
     mes = datetime.date.today().month
     anio = datetime.date.today().year
@@ -86,27 +85,29 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
     hogar_id = get_hogar_id(cur, user_id)
+
+    # Ingresos totales del hogar
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0)
         FROM ingresos
         WHERE hogar_id = %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     ingreso_total = float(cur.fetchone()[0])
+
+    # Presupuesto del hogar
     cur.execute("""
-        SELECT porcentaje_ahorro, porcentaje_comunes, porcentaje_personal
+        SELECT porcentaje_ahorro
         FROM presupuesto_hogar
         WHERE hogar_id = %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     presupuesto = cur.fetchone()
-    if presupuesto:
-        pct_ahorro = float(presupuesto[0])
-        pct_comunes = float(presupuesto[1])
-        pct_personal = float(presupuesto[2])
-    else:
-        pct_ahorro, pct_comunes, pct_personal = 20.0, 50.0, 30.0
+    pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
+
+    # Calcular ahorro
     monto_ahorro = ingreso_total * pct_ahorro / 100
-    monto_comunes = ingreso_total * pct_comunes / 100
-    monto_personal = ingreso_total * pct_personal / 100
+    tras_ahorro = ingreso_total - monto_ahorro
+
+    # Total gastos comunes reales del mes
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0)
         FROM gastos_comunes
@@ -114,36 +115,68 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
         AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
     """, (hogar_id,))
     gastos_comunes_real = float(cur.fetchone()[0])
+
+    # Total reserva periódicos
+    cur.execute("""
+        SELECT COALESCE(SUM(reserva_mensual), 0)
+        FROM gastos_periodicos
+        WHERE hogar_id = %s
+    """, (hogar_id,))
+    total_periodicos = float(cur.fetchone()[0])
+
+    # Total egresos = gastos comunes + periódicos
+    total_egresos = gastos_comunes_real + total_periodicos
+
+    # Disponible para mesada
+    disponible_mesada = tras_ahorro - total_egresos
+
+    # Número de miembros
+    cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
+    num_miembros = cur.fetchone()[0]
+    mesada_por_miembro = disponible_mesada / num_miembros if num_miembros > 0 else disponible_mesada
+
+    # Gastos personales del usuario este mes
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0)
         FROM gastos
         WHERE usuario_id = %s
         AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
     """, (user_id,))
-    gastos_personales_real = float(cur.fetchone()[0])
-    cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
-    num_miembros = cur.fetchone()[0]
-    personal_por_miembro = monto_personal / num_miembros if num_miembros > 0 else 0
+    gastos_personales = float(cur.fetchone()[0])
+
+    # Disponible personal
+    disponible_personal = mesada_por_miembro - gastos_personales
+
+    # Ahorro acumulado en fondos
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM ahorro
+        WHERE hogar_id = %s
+    """, (hogar_id,))
+    ahorro_acumulado = float(cur.fetchone()[0])
+
     cur.close()
     conn.close()
+
     return {
         "ingreso_total": ingreso_total,
         "num_miembros": num_miembros,
         "presupuesto": {
-            "pct_ahorro": pct_ahorro,
-            "pct_comunes": pct_comunes,
-            "pct_personal": pct_personal
+            "pct_ahorro": pct_ahorro
         },
         "montos": {
             "ahorro": monto_ahorro,
-            "comunes": monto_comunes,
-            "personal_total": monto_personal,
-            "personal_por_miembro": personal_por_miembro
-        },
-        "real": {
+            "tras_ahorro": tras_ahorro,
+            "egresos": total_egresos,
             "gastos_comunes": gastos_comunes_real,
-            "gastos_personales": gastos_personales_real,
-            "disponible_comunes": monto_comunes - gastos_comunes_real,
-            "disponible_personal": personal_por_miembro - gastos_personales_real
-        }
+            "periodicos": total_periodicos,
+            "mesada_total": disponible_mesada,
+            "mesada_por_miembro": mesada_por_miembro
+        },
+        "personal": {
+            "mesada": mesada_por_miembro,
+            "gastado": gastos_personales,
+            "disponible": disponible_personal
+        },
+        "ahorro_acumulado": ahorro_acumulado
     }
