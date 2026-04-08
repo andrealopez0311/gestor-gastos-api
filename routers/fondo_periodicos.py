@@ -245,3 +245,68 @@ def eliminar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
     cur.close()
     conn.close()
     return {"mensaje": "Cuota eliminada"}
+
+class AportarFondoRequest(BaseModel):
+    cantidad: float
+
+@router.post("/aportar")
+def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
+    mes = datetime.date.today().month
+    anio = datetime.date.today().year
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    hogar_id = hogar[0] if hogar else None
+
+    # Verificar mesada disponible
+    cur.execute("""
+        SELECT COALESCE(SUM(importe), 0) FROM ingresos
+        WHERE {} AND mes = %s AND anio = %s
+    """.format("hogar_id = %s" if hogar_id else "usuario_id = %s"),
+    (hogar_id if hogar_id else user_id, mes, anio))
+    ingreso_total = float(cur.fetchone()[0])
+
+    cur.execute("""
+        SELECT porcentaje_ahorro FROM presupuesto_hogar
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    presupuesto = cur.fetchone()
+    pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
+    tras_ahorro = ingreso_total * (1 - pct_ahorro / 100)
+
+    # Gastos personales del mes
+    cur.execute("""
+        SELECT COALESCE(SUM(importe), 0) FROM gastos
+        WHERE usuario_id = %s
+        AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+    """, (user_id,))
+    gastos_personales = float(cur.fetchone()[0])
+
+    disponible = tras_ahorro - gastos_personales
+    if data.cantidad > disponible:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No tienes suficiente mesada. Disponible: {disponible:.2f}€"
+        )
+
+    # Añadir al fondo
+    cur.execute("""
+        SELECT id FROM fondo_periodicos
+        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
+    """, (hogar_id, mes, anio))
+    fondo = cur.fetchone()
+
+    if fondo:
+        cur.execute("UPDATE fondo_periodicos SET acumulado = acumulado + %s WHERE id = %s",
+                   (data.cantidad, fondo[0]))
+    else:
+        cur.execute("""
+            INSERT INTO fondo_periodicos (hogar_id, acumulado, mes, anio)
+            VALUES (%s, %s, %s, %s)
+        """, (hogar_id, data.cantidad, mes, anio))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"mensaje": "Aportación registrada", "cantidad": data.cantidad}
