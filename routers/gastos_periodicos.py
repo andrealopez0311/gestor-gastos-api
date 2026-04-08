@@ -206,7 +206,7 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     """, (gasto_id,))
     cuota_proxima = cur.fetchone()
 
-    # Calcular saldo real del fondo (igual que en get_fondo)
+    # Calcular saldo real del fondo
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(reserva_mensual), 0)
@@ -270,14 +270,20 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
                 detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe_cuota:.2f}€"
             )
 
+        # Marcar cuota actual como pagada
         cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
 
+        # Crear nueva cuota para el año siguiente
         nueva_fecha = fecha_cuota.replace(year=fecha_cuota.year + 1)
         cur.execute("""
             INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
             VALUES (%s, %s, %s)
         """, (gasto_id, importe_cuota, nueva_fecha))
 
+        # Hacer commit para que la nueva cuota sea visible
+        conn.commit()
+
+        # Buscar siguiente cuota pendiente después del commit
         cur.execute("""
             SELECT fecha_pago FROM cuotas_periodicas
             WHERE gasto_periodico_id = %s AND pagada = FALSE
@@ -287,6 +293,7 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
         if siguiente:
             cur.execute("UPDATE gastos_periodicos SET proximo_pago = %s WHERE id = %s",
                        (siguiente[0], gasto_id))
+            conn.commit()
 
         importe_pagado = importe_cuota
 
@@ -310,9 +317,9 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
         cur.execute("UPDATE gastos_periodicos SET proximo_pago = %s WHERE id = %s",
                    (nuevo_proximo, gasto_id))
 
+        conn.commit()
         importe_pagado = importe
 
-    conn.commit()
     cur.close()
     conn.close()
     return {
