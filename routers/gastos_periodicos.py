@@ -260,3 +260,44 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     cur.close()
     conn.close()
     return {"mensaje": "Pago registrado", "descontado": importe, "fondo_restante": acumulado_disponible - importe}
+
+@router.get("/{gasto_id}/cuotas")
+def get_cuotas(gasto_id: int, user_id: int = Depends(get_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    hogar_id = get_hogar_id_opcional(cur, user_id)
+
+    # Verificar que el gasto pertenece al usuario o su hogar
+    if hogar_id:
+        cur.execute("""
+            SELECT id FROM gastos_periodicos
+            WHERE id = %s AND hogar_id = %s
+        """, (gasto_id, hogar_id))
+    else:
+        cur.execute("""
+            SELECT id FROM gastos_periodicos
+            WHERE id = %s AND usuario_id = %s AND hogar_id IS NULL
+        """, (gasto_id, user_id))
+
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Gasto no encontrado")
+
+    cur.execute("""
+        SELECT id, importe, fecha_pago, pagada
+        FROM cuotas_periodicas
+        WHERE gasto_periodico_id = %s
+        ORDER BY fecha_pago ASC
+    """, (gasto_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    hoy = datetime.date.today()
+    return [{
+        "id": r[0],
+        "importe": float(r[1]),
+        "fecha_pago": str(r[2]),
+        "pagada": r[3],
+        "dias_restantes": (r[2] - hoy).days if r[2] else None,
+        "alerta": (r[2] - hoy).days <= 30 if r[2] else False
+    } for r in rows]
