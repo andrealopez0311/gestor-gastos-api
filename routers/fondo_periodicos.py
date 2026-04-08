@@ -31,6 +31,7 @@ def get_fondo(user_id: int = Depends(get_user)):
     hogar = cur.fetchone()
     hogar_id = hogar[0] if hogar else None
 
+    # Reserva mensual total
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(reserva_mensual), 0)
@@ -43,7 +44,20 @@ def get_fondo(user_id: int = Depends(get_user)):
         """, (user_id,))
     reserva_mensual = float(cur.fetchone()[0])
 
-    # Saldo del fondo filtrado por usuario o hogar
+    # Fecha del primer gasto periódico
+    if hogar_id:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
+    else:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
+    primera_fecha = cur.fetchone()[0]
+
+    hoy = datetime.date.today()
+    meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
+
+    # Acumulado teórico = reserva mensual * meses
+    acumulado_teorico = reserva_mensual * meses
+
+    # Aportaciones extra de la mesada
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(acumulado), 0)
@@ -54,8 +68,9 @@ def get_fondo(user_id: int = Depends(get_user)):
             SELECT COALESCE(SUM(acumulado), 0)
             FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
         """, (user_id,))
-    saldo_fondo = float(cur.fetchone()[0])
+    aportaciones_extra = float(cur.fetchone()[0])
 
+    # Total pagado en cuotas
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(cp.importe), 0)
@@ -71,17 +86,11 @@ def get_fondo(user_id: int = Depends(get_user)):
             WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = TRUE
         """, (user_id,))
     total_pagado = float(cur.fetchone()[0])
-    saldo = saldo_fondo - total_pagado
 
-    if hogar_id:
-        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
-    else:
-        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
-    primera_fecha = cur.fetchone()[0]
+    # Saldo = acumulado teórico + aportaciones extra - pagado
+    saldo = acumulado_teorico + aportaciones_extra - total_pagado
 
-    hoy = datetime.date.today()
-    meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
-
+    # Próximas cuotas pendientes
     if hogar_id:
         cur.execute("""
             SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
@@ -107,7 +116,7 @@ def get_fondo(user_id: int = Depends(get_user)):
 
     return {
         "saldo": saldo,
-        "saldo_bruto": saldo_fondo,
+        "aportaciones_extra": aportaciones_extra,
         "reserva_mensual": reserva_mensual,
         "meses_acumulados": meses,
         "cuotas_pendientes": [{
