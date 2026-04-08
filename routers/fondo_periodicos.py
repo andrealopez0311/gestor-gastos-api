@@ -90,27 +90,47 @@ def get_fondo(user_id: int = Depends(get_user)):
     # Saldo = acumulado teórico + aportaciones extra - pagado
     saldo = acumulado_teorico + aportaciones_extra - total_pagado
 
-    # Próximas cuotas pendientes
+   # Próximas cuotas pendientes (irregulares + pagos únicos próximos)
+        # Próximas cuotas pendientes (irregulares + pagos únicos próximos)
     if hogar_id:
         cur.execute("""
             SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
-                   (cp.fecha_pago - CURRENT_DATE)
+                (cp.fecha_pago - CURRENT_DATE)
             FROM cuotas_periodicas cp
             JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
             WHERE gp.hogar_id = %s AND cp.pagada = FALSE
-            ORDER BY cp.fecha_pago ASC
-        """, (hogar_id,))
+            UNION ALL
+            SELECT -gp.id, gp.nombre, gp.importe, gp.proximo_pago,
+                (gp.proximo_pago - CURRENT_DATE)
+            FROM gastos_periodicos gp
+            WHERE gp.hogar_id = %s
+            AND gp.proximo_pago IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM cuotas_periodicas cp
+                WHERE cp.gasto_periodico_id = gp.id AND cp.pagada = FALSE
+            )
+            ORDER BY 4 ASC
+        """, (hogar_id, hogar_id))
     else:
         cur.execute("""
             SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
-                   (cp.fecha_pago - CURRENT_DATE)
+                (cp.fecha_pago - CURRENT_DATE)
             FROM cuotas_periodicas cp
             JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
             WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = FALSE
-            ORDER BY cp.fecha_pago ASC
-        """, (user_id,))
+            UNION ALL
+            SELECT -gp.id, gp.nombre, gp.importe, gp.proximo_pago,
+                (gp.proximo_pago - CURRENT_DATE)
+            FROM gastos_periodicos gp
+            WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL
+            AND gp.proximo_pago IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM cuotas_periodicas cp
+                WHERE cp.gasto_periodico_id = gp.id AND cp.pagada = FALSE
+            )
+            ORDER BY 4 ASC
+        """, (user_id, user_id))
     cuotas = cur.fetchall()
-
     cur.close()
     conn.close()
 

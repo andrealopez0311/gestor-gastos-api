@@ -98,13 +98,32 @@ def crear_gasto_periodico(data: GastoPeriodicoRequest, user_id: int = Depends(ge
     gasto_id = row[0]
     reserva = float(row[1])
 
-    # Crear cuotas irregulares si se proporcionan
+    # Crear cuotas irregulares para los próximos 3 años
     if data.cuotas:
-        for cuota in data.cuotas:
-            cur.execute("""
-                INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
-                VALUES (%s, %s, %s)
-            """, (gasto_id, cuota["importe"], cuota["fecha_pago"]))
+        for anio_offset in range(3):
+            for cuota in data.cuotas:
+                try:
+                    fecha_base = datetime.date.fromisoformat(cuota["fecha_pago"])
+                    nueva_fecha = fecha_base.replace(year=fecha_base.year + anio_offset)
+                    # Solo crear si es futura
+                    if nueva_fecha >= datetime.date.today():
+                        cur.execute("""
+                            INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
+                            VALUES (%s, %s, %s)
+                        """, (gasto_id, cuota["importe"], nueva_fecha))
+                except Exception:
+                    pass
+
+        # Actualizar proximo_pago al de la primera cuota pendiente
+        cur.execute("""
+            SELECT fecha_pago FROM cuotas_periodicas
+            WHERE gasto_periodico_id = %s AND pagada = FALSE
+            ORDER BY fecha_pago ASC LIMIT 1
+        """, (gasto_id,))
+        primera = cur.fetchone()
+        if primera:
+            cur.execute("UPDATE gastos_periodicos SET proximo_pago = %s WHERE id = %s",
+                       (primera[0], gasto_id))
 
     conn.commit()
     cur.close()
@@ -198,7 +217,6 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     frecuencia = gasto[1]
     proximo_pago = gasto[2]
 
-    # Verificar si tiene cuotas irregulares pendientes
     cur.execute("""
         SELECT id, importe, fecha_pago FROM cuotas_periodicas
         WHERE gasto_periodico_id = %s AND pagada = FALSE
@@ -206,7 +224,6 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     """, (gasto_id,))
     cuota_proxima = cur.fetchone()
 
-    # Calcular saldo real del fondo
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(reserva_mensual), 0)
@@ -273,17 +290,26 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
         # Marcar cuota actual como pagada
         cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
 
-        # Crear nueva cuota para el año siguiente
-        nueva_fecha = fecha_cuota.replace(year=fecha_cuota.year + 1)
+        # Verificar cuántos años futuros tenemos cubiertos
         cur.execute("""
-            INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
-            VALUES (%s, %s, %s)
-        """, (gasto_id, importe_cuota, nueva_fecha))
+            SELECT MAX(fecha_pago) FROM cuotas_periodicas
+            WHERE gasto_periodico_id = %s AND pagada = FALSE
+        """, (gasto_id,))
+        ultima_fecha = cur.fetchone()[0]
+        anios_cubiertos = (ultima_fecha.year - hoy.year) if ultima_fecha else 0
 
-        # Hacer commit para que la nueva cuota sea visible
+        # Mantener 3 años de cobertura
+        if anios_cubiertos < 3:
+            nueva_fecha = fecha_cuota.replace(year=fecha_cuota.year + (3 - anios_cubiertos))
+            cur.execute("""
+                INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
+                VALUES (%s, %s, %s)
+            """, (gasto_id, importe_cuota, nueva_fecha))
+
+        # Commit para que la nueva cuota sea visible
         conn.commit()
 
-        # Buscar siguiente cuota pendiente después del commit
+        # Buscar siguiente cuota pendiente
         cur.execute("""
             SELECT fecha_pago FROM cuotas_periodicas
             WHERE gasto_periodico_id = %s AND pagada = FALSE
