@@ -206,15 +206,41 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     """, (gasto_id,))
     cuota_proxima = cur.fetchone()
 
-    # Saldo real del fondo
-    cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM fondo_periodicos
-        WHERE hogar_id IS NOT DISTINCT FROM %s
-    """, (hogar_id,))
-    saldo_fondo = float(cur.fetchone()[0])
+    # Calcular saldo real del fondo (igual que en get_fondo)
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
+    reserva_mensual = float(cur.fetchone()[0])
 
-    # Total ya pagado en cuotas
+    if hogar_id:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
+    else:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
+    primera_fecha = cur.fetchone()[0]
+
+    hoy = datetime.date.today()
+    meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
+    acumulado_teorico = reserva_mensual * meses
+
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM fondo_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
+    aportaciones_extra = float(cur.fetchone()[0])
+
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(cp.importe), 0)
@@ -230,9 +256,8 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
             WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = TRUE
         """, (user_id,))
     total_pagado = float(cur.fetchone()[0])
-    acumulado_disponible = saldo_fondo - total_pagado
 
-    hoy = datetime.date.today()
+    acumulado_disponible = acumulado_teorico + aportaciones_extra - total_pagado
 
     if cuota_proxima:
         cuota_id = cuota_proxima[0]
@@ -286,18 +311,6 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
                    (nuevo_proximo, gasto_id))
 
         importe_pagado = importe
-
-    # Descontar del fondo real
-    cur.execute("""
-        UPDATE fondo_periodicos
-        SET acumulado = GREATEST(0, acumulado - %s)
-        WHERE hogar_id IS NOT DISTINCT FROM %s
-        AND id = (
-            SELECT id FROM fondo_periodicos
-            WHERE hogar_id IS NOT DISTINCT FROM %s
-            ORDER BY creado_en DESC LIMIT 1
-        )
-    """, (importe_pagado, hogar_id, hogar_id))
 
     conn.commit()
     cur.close()
