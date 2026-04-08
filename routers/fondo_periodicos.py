@@ -286,6 +286,89 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
     hogar = cur.fetchone()
     hogar_id = hogar[0] if hogar else None
 
+    # Si el id es negativo es un gasto periódico de pago único
+    if cuota_id < 0:
+        gasto_id = abs(cuota_id)
+        if hogar_id:
+            cur.execute("""
+                SELECT importe, frecuencia, proximo_pago
+                FROM gastos_periodicos WHERE id = %s AND hogar_id = %s
+            """, (gasto_id, hogar_id))
+        else:
+            cur.execute("""
+                SELECT importe, frecuencia, proximo_pago
+                FROM gastos_periodicos WHERE id = %s AND usuario_id = %s AND hogar_id IS NULL
+            """, (gasto_id, user_id))
+        gasto = cur.fetchone()
+        if not gasto:
+            raise HTTPException(status_code=404, detail="Gasto no encontrado")
+        importe = float(gasto[0])
+        frecuencia = gasto[1]
+        proximo_pago = gasto[2]
+
+        # Calcular saldo
+        if hogar_id:
+            cur.execute("""SELECT COALESCE(SUM(reserva_mensual), 0) FROM gastos_periodicos WHERE hogar_id = %s""", (hogar_id,))
+        else:
+            cur.execute("""SELECT COALESCE(SUM(reserva_mensual), 0) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL""", (user_id,))
+        reserva_mensual = float(cur.fetchone()[0])
+
+        if hogar_id:
+            cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
+        else:
+            cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
+        primera_fecha = cur.fetchone()[0]
+
+        hoy = datetime.date.today()
+        meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
+        acumulado_teorico = reserva_mensual * meses
+
+        if hogar_id:
+            cur.execute("""SELECT COALESCE(SUM(acumulado), 0) FROM fondo_periodicos WHERE hogar_id = %s""", (hogar_id,))
+        else:
+            cur.execute("""SELECT COALESCE(SUM(acumulado), 0) FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL""", (user_id,))
+        aportaciones_extra = float(cur.fetchone()[0])
+
+        if hogar_id:
+            cur.execute("""
+                SELECT COALESCE(SUM(cp.importe), 0) FROM cuotas_periodicas cp
+                JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+                WHERE gp.hogar_id = %s AND cp.pagada = TRUE
+            """, (hogar_id,))
+        else:
+            cur.execute("""
+                SELECT COALESCE(SUM(cp.importe), 0) FROM cuotas_periodicas cp
+                JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+                WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = TRUE
+            """, (user_id,))
+        total_pagado = float(cur.fetchone()[0])
+        acumulado = acumulado_teorico + aportaciones_extra - total_pagado
+
+        if acumulado < importe:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Fondo insuficiente. Disponible: {acumulado:.2f}€, necesitas: {importe:.2f}€"
+            )
+
+        # Registrar pago y actualizar próximo pago
+        cur.execute("""
+            INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago, pagada)
+            VALUES (%s, %s, CURRENT_DATE, TRUE)
+        """, (gasto_id, importe))
+
+        if proximo_pago:
+            nuevo_proximo = proximo_pago + datetime.timedelta(days=frecuencia * 30)
+        else:
+            nuevo_proximo = hoy + datetime.timedelta(days=frecuencia * 30)
+
+        cur.execute("UPDATE gastos_periodicos SET proximo_pago = %s WHERE id = %s",
+                   (nuevo_proximo, gasto_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"mensaje": "Pago registrado", "descontado": importe, "fondo_restante": acumulado - importe}
+
+    # Si el id es positivo es una cuota irregular
     cur.execute("""
         SELECT cp.importe FROM cuotas_periodicas cp
         WHERE cp.id = %s AND cp.pagada = FALSE
@@ -295,17 +378,10 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
         raise HTTPException(status_code=404, detail="Cuota no encontrada")
     importe = float(cuota[0])
 
-    # Calcular saldo real del fondo
     if hogar_id:
-        cur.execute("""
-            SELECT COALESCE(SUM(reserva_mensual), 0)
-            FROM gastos_periodicos WHERE hogar_id = %s
-        """, (hogar_id,))
+        cur.execute("""SELECT COALESCE(SUM(reserva_mensual), 0) FROM gastos_periodicos WHERE hogar_id = %s""", (hogar_id,))
     else:
-        cur.execute("""
-            SELECT COALESCE(SUM(reserva_mensual), 0)
-            FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
-        """, (user_id,))
+        cur.execute("""SELECT COALESCE(SUM(reserva_mensual), 0) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL""", (user_id,))
     reserva_mensual = float(cur.fetchone()[0])
 
     if hogar_id:
@@ -319,33 +395,24 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
     acumulado_teorico = reserva_mensual * meses
 
     if hogar_id:
-        cur.execute("""
-            SELECT COALESCE(SUM(acumulado), 0)
-            FROM fondo_periodicos WHERE hogar_id = %s
-        """, (hogar_id,))
+        cur.execute("""SELECT COALESCE(SUM(acumulado), 0) FROM fondo_periodicos WHERE hogar_id = %s""", (hogar_id,))
     else:
-        cur.execute("""
-            SELECT COALESCE(SUM(acumulado), 0)
-            FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
-        """, (user_id,))
+        cur.execute("""SELECT COALESCE(SUM(acumulado), 0) FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL""", (user_id,))
     aportaciones_extra = float(cur.fetchone()[0])
 
     if hogar_id:
         cur.execute("""
-            SELECT COALESCE(SUM(cp.importe), 0)
-            FROM cuotas_periodicas cp
+            SELECT COALESCE(SUM(cp.importe), 0) FROM cuotas_periodicas cp
             JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
             WHERE gp.hogar_id = %s AND cp.pagada = TRUE
         """, (hogar_id,))
     else:
         cur.execute("""
-            SELECT COALESCE(SUM(cp.importe), 0)
-            FROM cuotas_periodicas cp
+            SELECT COALESCE(SUM(cp.importe), 0) FROM cuotas_periodicas cp
             JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
             WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = TRUE
         """, (user_id,))
     total_pagado = float(cur.fetchone()[0])
-
     acumulado = acumulado_teorico + aportaciones_extra - total_pagado
 
     if acumulado < importe:
@@ -354,7 +421,6 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
             detail=f"Fondo insuficiente. Disponible: {acumulado:.2f}€, necesitas: {importe:.2f}€"
         )
 
-    # Solo marcar como pagada, el saldo se calcula automáticamente
     cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
     conn.commit()
     cur.close()
