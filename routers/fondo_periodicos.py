@@ -3,7 +3,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_connection
 from auth import decode_token
 from pydantic import BaseModel
-from typing import Optional
 import datetime
 
 router = APIRouter(prefix="/fondo-periodicos", tags=["fondo-periodicos"])
@@ -44,11 +43,17 @@ def get_fondo(user_id: int = Depends(get_user)):
         """, (user_id,))
     reserva_mensual = float(cur.fetchone()[0])
 
-    cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM fondo_periodicos
-        WHERE hogar_id IS NOT DISTINCT FROM %s
-    """, (hogar_id,))
+    # Saldo del fondo filtrado por usuario o hogar
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM fondo_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
     saldo_fondo = float(cur.fetchone()[0])
 
     if hogar_id:
@@ -160,10 +165,16 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
             detail=f"No tienes suficiente mesada. Disponible: {disponible:.2f}€"
         )
 
-    cur.execute("""
-        SELECT id FROM fondo_periodicos
-        WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
+    if hogar_id:
+        cur.execute("""
+            SELECT id FROM fondo_periodicos
+            WHERE hogar_id = %s AND mes = %s AND anio = %s
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT id FROM fondo_periodicos
+            WHERE usuario_id = %s AND hogar_id IS NULL AND mes = %s AND anio = %s
+        """, (user_id, mes, anio))
     fondo = cur.fetchone()
 
     if fondo:
@@ -171,9 +182,9 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
                    (data.cantidad, fondo[0]))
     else:
         cur.execute("""
-            INSERT INTO fondo_periodicos (hogar_id, acumulado, mes, anio)
-            VALUES (%s, %s, %s, %s)
-        """, (hogar_id, data.cantidad, mes, anio))
+            INSERT INTO fondo_periodicos (hogar_id, usuario_id, acumulado, mes, anio)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (hogar_id, user_id, data.cantidad, mes, anio))
 
     conn.commit()
     cur.close()
@@ -190,7 +201,6 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
 
     cur.execute("""
         SELECT cp.importe FROM cuotas_periodicas cp
-        JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
         WHERE cp.id = %s AND cp.pagada = FALSE
     """, (cuota_id,))
     cuota = cur.fetchone()
@@ -198,10 +208,16 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
         raise HTTPException(status_code=404, detail="Cuota no encontrada")
     importe = float(cuota[0])
 
-    cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM fondo_periodicos WHERE hogar_id IS NOT DISTINCT FROM %s
-    """, (hogar_id,))
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM fondo_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(acumulado), 0)
+            FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
     acumulado = float(cur.fetchone()[0])
 
     if acumulado < importe:
@@ -210,16 +226,18 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
             detail=f"Fondo insuficiente. Acumulado: {acumulado:.2f}€, necesitas: {importe:.2f}€"
         )
 
-    cur.execute("""
-        UPDATE fondo_periodicos
-        SET acumulado = acumulado - %s
-        WHERE hogar_id IS NOT DISTINCT FROM %s
-        AND id = (
-            SELECT id FROM fondo_periodicos
-            WHERE hogar_id IS NOT DISTINCT FROM %s
-            ORDER BY creado_en DESC LIMIT 1
-        )
-    """, (importe, hogar_id, hogar_id))
+    if hogar_id:
+        cur.execute("""
+            UPDATE fondo_periodicos SET acumulado = acumulado - %s
+            WHERE hogar_id = %s
+            AND id = (SELECT id FROM fondo_periodicos WHERE hogar_id = %s ORDER BY creado_en DESC LIMIT 1)
+        """, (importe, hogar_id, hogar_id))
+    else:
+        cur.execute("""
+            UPDATE fondo_periodicos SET acumulado = acumulado - %s
+            WHERE usuario_id = %s AND hogar_id IS NULL
+            AND id = (SELECT id FROM fondo_periodicos WHERE usuario_id = %s AND hogar_id IS NULL ORDER BY creado_en DESC LIMIT 1)
+        """, (importe, user_id, user_id))
 
     cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
     conn.commit()
@@ -231,9 +249,7 @@ def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
 def eliminar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("""
-        DELETE FROM cuotas_periodicas WHERE id = %s
-    """, (cuota_id,))
+    cur.execute("DELETE FROM cuotas_periodicas WHERE id = %s", (cuota_id,))
     conn.commit()
     cur.close()
     conn.close()
