@@ -206,29 +206,15 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     """, (gasto_id,))
     cuota_proxima = cur.fetchone()
 
-    # Calcular acumulado teórico del fondo
-    if hogar_id:
-        cur.execute("""
-            SELECT COALESCE(SUM(reserva_mensual), 0)
-            FROM gastos_periodicos WHERE hogar_id = %s
-        """, (hogar_id,))
-    else:
-        cur.execute("""
-            SELECT COALESCE(SUM(reserva_mensual), 0)
-            FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
-        """, (user_id,))
-    reserva_mensual = float(cur.fetchone()[0])
+    # Saldo real del fondo
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM fondo_periodicos
+        WHERE hogar_id IS NOT DISTINCT FROM %s
+    """, (hogar_id,))
+    saldo_fondo = float(cur.fetchone()[0])
 
-    if hogar_id:
-        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
-    else:
-        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
-    primera_fecha = cur.fetchone()[0]
-
-    hoy = datetime.date.today()
-    meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 1
-    acumulado_teorico = reserva_mensual * meses
-
+    # Total ya pagado en cuotas
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(cp.importe), 0)
@@ -244,10 +230,11 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
             WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = TRUE
         """, (user_id,))
     total_pagado = float(cur.fetchone()[0])
-    acumulado_disponible = acumulado_teorico - total_pagado
+    acumulado_disponible = saldo_fondo - total_pagado
+
+    hoy = datetime.date.today()
 
     if cuota_proxima:
-        # Tiene cuotas irregulares - pagar la próxima cuota
         cuota_id = cuota_proxima[0]
         importe_cuota = float(cuota_proxima[1])
         fecha_cuota = cuota_proxima[2]
@@ -258,17 +245,14 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
                 detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe_cuota:.2f}€"
             )
 
-        # Marcar cuota como pagada
         cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
 
-        # Crear la misma cuota para el próximo año
         nueva_fecha = fecha_cuota.replace(year=fecha_cuota.year + 1)
         cur.execute("""
             INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
             VALUES (%s, %s, %s)
         """, (gasto_id, importe_cuota, nueva_fecha))
 
-        # Actualizar próximo pago al de la siguiente cuota pendiente
         cur.execute("""
             SELECT fecha_pago FROM cuotas_periodicas
             WHERE gasto_periodico_id = %s AND pagada = FALSE
@@ -282,20 +266,17 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
         importe_pagado = importe_cuota
 
     else:
-        # Pago único - verificar fondo
         if acumulado_disponible < importe:
             raise HTTPException(
                 status_code=400,
                 detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe:.2f}€"
             )
 
-        # Registrar pago
         cur.execute("""
             INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago, pagada)
             VALUES (%s, %s, CURRENT_DATE, TRUE)
         """, (gasto_id, importe))
 
-        # Calcular próximo pago según frecuencia
         if proximo_pago:
             nuevo_proximo = proximo_pago + datetime.timedelta(days=frecuencia * 30)
         else:
@@ -305,6 +286,18 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
                    (nuevo_proximo, gasto_id))
 
         importe_pagado = importe
+
+    # Descontar del fondo real
+    cur.execute("""
+        UPDATE fondo_periodicos
+        SET acumulado = GREATEST(0, acumulado - %s)
+        WHERE hogar_id IS NOT DISTINCT FROM %s
+        AND id = (
+            SELECT id FROM fondo_periodicos
+            WHERE hogar_id IS NOT DISTINCT FROM %s
+            ORDER BY creado_en DESC LIMIT 1
+        )
+    """, (importe_pagado, hogar_id, hogar_id))
 
     conn.commit()
     cur.close()

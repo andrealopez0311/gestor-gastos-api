@@ -52,17 +52,13 @@ def get_fondo(user_id: int = Depends(get_user)):
         """, (user_id,))
     reserva_mensual = float(cur.fetchone()[0])
 
-    # Fecha primer gasto periódico
-    if hogar_id:
-        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
-    else:
-        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
-    primera_fecha = cur.fetchone()[0]
-
-    import datetime
-    hoy = datetime.date.today()
-    meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
-    acumulado_teorico = reserva_mensual * meses
+    # Saldo real en la tabla fondo_periodicos
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM fondo_periodicos
+        WHERE hogar_id IS NOT DISTINCT FROM %s
+    """, (hogar_id,))
+    saldo_fondo = float(cur.fetchone()[0])
 
     # Total pagado en cuotas
     if hogar_id:
@@ -81,7 +77,19 @@ def get_fondo(user_id: int = Depends(get_user)):
         """, (user_id,))
     total_pagado = float(cur.fetchone()[0])
 
-    saldo = acumulado_teorico - total_pagado
+    # Saldo disponible = lo acumulado en el fondo - lo pagado
+    saldo = saldo_fondo - total_pagado
+
+    # Meses acumulados
+    if hogar_id:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
+    else:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
+    primera_fecha = cur.fetchone()[0]
+
+    import datetime
+    hoy = datetime.date.today()
+    meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
 
     # Próximas cuotas pendientes
     if hogar_id:
@@ -109,6 +117,7 @@ def get_fondo(user_id: int = Depends(get_user)):
 
     return {
         "saldo": saldo,
+        "saldo_bruto": saldo_fondo,
         "reserva_mensual": reserva_mensual,
         "meses_acumulados": meses,
         "cuotas_pendientes": [{
