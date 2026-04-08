@@ -14,8 +14,8 @@ class CuotaRequest(BaseModel):
     importe: float
     fecha_pago: str
 
-class PagarCuotaRequest(BaseModel):
-    cuota_id: int
+class AportarFondoRequest(BaseModel):
+    cantidad: float
 
 def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
@@ -23,13 +23,6 @@ def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not user_id:
         raise HTTPException(status_code=401, detail="No autorizado")
     return int(user_id)
-
-def get_hogar_id(cur, user_id: int):
-    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
-    hogar = cur.fetchone()
-    if not hogar:
-        raise HTTPException(status_code=400, detail="No perteneces a ningún hogar")
-    return hogar[0]
 
 @router.get("/")
 def get_fondo(user_id: int = Depends(get_user)):
@@ -39,7 +32,6 @@ def get_fondo(user_id: int = Depends(get_user)):
     hogar = cur.fetchone()
     hogar_id = hogar[0] if hogar else None
 
-    # Reserva mensual total
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(reserva_mensual), 0)
@@ -52,7 +44,6 @@ def get_fondo(user_id: int = Depends(get_user)):
         """, (user_id,))
     reserva_mensual = float(cur.fetchone()[0])
 
-    # Saldo real en la tabla fondo_periodicos
     cur.execute("""
         SELECT COALESCE(SUM(acumulado), 0)
         FROM fondo_periodicos
@@ -60,7 +51,6 @@ def get_fondo(user_id: int = Depends(get_user)):
     """, (hogar_id,))
     saldo_fondo = float(cur.fetchone()[0])
 
-    # Total pagado en cuotas
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(cp.importe), 0)
@@ -76,26 +66,21 @@ def get_fondo(user_id: int = Depends(get_user)):
             WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = TRUE
         """, (user_id,))
     total_pagado = float(cur.fetchone()[0])
-
-    # Saldo disponible = lo acumulado en el fondo - lo pagado
     saldo = saldo_fondo - total_pagado
 
-    # Meses acumulados
     if hogar_id:
         cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
     else:
         cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
     primera_fecha = cur.fetchone()[0]
 
-    import datetime
     hoy = datetime.date.today()
     meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
 
-    # Próximas cuotas pendientes
     if hogar_id:
         cur.execute("""
             SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
-                   (cp.fecha_pago - CURRENT_DATE) as dias_restantes
+                   (cp.fecha_pago - CURRENT_DATE)
             FROM cuotas_periodicas cp
             JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
             WHERE gp.hogar_id = %s AND cp.pagada = FALSE
@@ -104,7 +89,7 @@ def get_fondo(user_id: int = Depends(get_user)):
     else:
         cur.execute("""
             SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
-                   (cp.fecha_pago - CURRENT_DATE) as dias_restantes
+                   (cp.fecha_pago - CURRENT_DATE)
             FROM cuotas_periodicas cp
             JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
             WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = FALSE
@@ -125,138 +110,11 @@ def get_fondo(user_id: int = Depends(get_user)):
             "nombre": r[1],
             "importe": float(r[2]),
             "fecha_pago": str(r[3]),
-            "dias_restantes": r[4].days if r[4] else None,
-            "alerta": r[4].days <= 30 if r[4] else False,
+            "dias_restantes": r[4].days if hasattr(r[4], 'days') else int(r[4]) if r[4] is not None else None,
+            "alerta": (r[4].days <= 30 if hasattr(r[4], 'days') else int(r[4]) <= 30) if r[4] is not None else False,
             "cubierta": saldo >= float(r[2])
         } for r in cuotas]
     }
-
-@router.post("/acumular")
-def acumular_mes(user_id: int = Depends(get_user)):
-    mes = datetime.date.today().month
-    anio = datetime.date.today().year
-    conn = get_connection()
-    cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
-
-    # Calcular reserva mensual total
-    cur.execute("""
-        SELECT COALESCE(SUM(reserva_mensual), 0)
-        FROM gastos_periodicos WHERE hogar_id = %s
-    """, (hogar_id,))
-    reserva = float(cur.fetchone()[0])
-
-    # Comprobar si ya se acumuló este mes
-    cur.execute("""
-        SELECT id FROM fondo_periodicos
-        WHERE hogar_id = %s AND mes = %s AND anio = %s
-    """, (hogar_id, mes, anio))
-    existente = cur.fetchone()
-
-    if existente:
-        raise HTTPException(status_code=400, detail="Ya se acumuló este mes")
-
-    cur.execute("""
-        INSERT INTO fondo_periodicos (hogar_id, acumulado, mes, anio)
-        VALUES (%s, %s, %s, %s)
-    """, (hogar_id, reserva, mes, anio))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"mensaje": "Reserva acumulada", "cantidad": reserva}
-
-@router.post("/cuotas")
-def crear_cuota(data: CuotaRequest, user_id: int = Depends(get_user)):
-    conn = get_connection()
-    cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
-
-    # Verificar que el gasto periódico pertenece al hogar
-    cur.execute("""
-        SELECT id FROM gastos_periodicos
-        WHERE id = %s AND hogar_id = %s
-    """, (data.gasto_periodico_id, hogar_id))
-    if not cur.fetchone():
-        raise HTTPException(status_code=404, detail="Gasto periódico no encontrado")
-
-    cur.execute("""
-        INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
-        VALUES (%s, %s, %s) RETURNING id
-    """, (data.gasto_periodico_id, data.importe, data.fecha_pago))
-    cuota_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"mensaje": "Cuota creada", "id": cuota_id}
-
-@router.put("/cuotas/{cuota_id}/pagar")
-def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
-    conn = get_connection()
-    cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
-
-    # Obtener importe de la cuota
-    cur.execute("""
-        SELECT cp.importe FROM cuotas_periodicas cp
-        JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
-        WHERE cp.id = %s AND gp.hogar_id = %s AND cp.pagada = FALSE
-    """, (cuota_id, hogar_id))
-    cuota = cur.fetchone()
-    if not cuota:
-        raise HTTPException(status_code=404, detail="Cuota no encontrada")
-
-    importe = float(cuota[0])
-
-    # Verificar que hay suficiente en el fondo
-    cur.execute("""
-        SELECT COALESCE(SUM(acumulado), 0)
-        FROM fondo_periodicos WHERE hogar_id = %s
-    """, (hogar_id,))
-    acumulado = float(cur.fetchone()[0])
-
-    if acumulado < importe:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Fondo insuficiente. Acumulado: {acumulado:.2f}€, necesitas: {importe:.2f}€"
-        )
-
-    # Descontar del fondo y marcar como pagada
-    cur.execute("""
-        UPDATE fondo_periodicos
-        SET acumulado = acumulado - %s
-        WHERE hogar_id = %s AND id = (
-            SELECT id FROM fondo_periodicos
-            WHERE hogar_id = %s ORDER BY creado_en DESC LIMIT 1
-        )
-    """, (importe, hogar_id, hogar_id))
-
-    cur.execute("""
-        UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s
-    """, (cuota_id,))
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"mensaje": "Cuota pagada", "descontado": importe, "fondo_restante": acumulado - importe}
-
-@router.delete("/cuotas/{cuota_id}")
-def eliminar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
-    conn = get_connection()
-    cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
-    cur.execute("""
-        DELETE FROM cuotas_periodicas cp
-        USING gastos_periodicos gp
-        WHERE cp.gasto_periodico_id = gp.id
-        AND cp.id = %s AND gp.hogar_id = %s
-    """, (cuota_id, hogar_id))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"mensaje": "Cuota eliminada"}
-
-class AportarFondoRequest(BaseModel):
-    cantidad: float
 
 @router.post("/aportar")
 def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
@@ -268,12 +126,16 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
     hogar = cur.fetchone()
     hogar_id = hogar[0] if hogar else None
 
-    # Verificar mesada disponible
-    cur.execute("""
-        SELECT COALESCE(SUM(importe), 0) FROM ingresos
-        WHERE {} AND mes = %s AND anio = %s
-    """.format("hogar_id = %s" if hogar_id else "usuario_id = %s"),
-    (hogar_id if hogar_id else user_id, mes, anio))
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0) FROM ingresos
+            WHERE hogar_id = %s AND mes = %s AND anio = %s
+        """, (hogar_id, mes, anio))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0) FROM ingresos
+            WHERE usuario_id = %s AND mes = %s AND anio = %s
+        """, (user_id, mes, anio))
     ingreso_total = float(cur.fetchone()[0])
 
     cur.execute("""
@@ -284,7 +146,6 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
     pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
     tras_ahorro = ingreso_total * (1 - pct_ahorro / 100)
 
-    # Gastos personales del mes
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0) FROM gastos
         WHERE usuario_id = %s
@@ -299,7 +160,6 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
             detail=f"No tienes suficiente mesada. Disponible: {disponible:.2f}€"
         )
 
-    # Añadir al fondo
     cur.execute("""
         SELECT id FROM fondo_periodicos
         WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
@@ -319,3 +179,62 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
     cur.close()
     conn.close()
     return {"mensaje": "Aportación registrada", "cantidad": data.cantidad}
+
+@router.put("/cuotas/{cuota_id}/pagar")
+def pagar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    hogar_id = hogar[0] if hogar else None
+
+    cur.execute("""
+        SELECT cp.importe FROM cuotas_periodicas cp
+        JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+        WHERE cp.id = %s AND cp.pagada = FALSE
+    """, (cuota_id,))
+    cuota = cur.fetchone()
+    if not cuota:
+        raise HTTPException(status_code=404, detail="Cuota no encontrada")
+    importe = float(cuota[0])
+
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM fondo_periodicos WHERE hogar_id IS NOT DISTINCT FROM %s
+    """, (hogar_id,))
+    acumulado = float(cur.fetchone()[0])
+
+    if acumulado < importe:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fondo insuficiente. Acumulado: {acumulado:.2f}€, necesitas: {importe:.2f}€"
+        )
+
+    cur.execute("""
+        UPDATE fondo_periodicos
+        SET acumulado = acumulado - %s
+        WHERE hogar_id IS NOT DISTINCT FROM %s
+        AND id = (
+            SELECT id FROM fondo_periodicos
+            WHERE hogar_id IS NOT DISTINCT FROM %s
+            ORDER BY creado_en DESC LIMIT 1
+        )
+    """, (importe, hogar_id, hogar_id))
+
+    cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"mensaje": "Cuota pagada", "descontado": importe, "fondo_restante": acumulado - importe}
+
+@router.delete("/cuotas/{cuota_id}")
+def eliminar_cuota(cuota_id: int, user_id: int = Depends(get_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM cuotas_periodicas WHERE id = %s
+    """, (cuota_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"mensaje": "Cuota eliminada"}
