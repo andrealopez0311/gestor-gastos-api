@@ -90,8 +90,8 @@ def get_fondo(user_id: int = Depends(get_user)):
     # Saldo = acumulado teórico + aportaciones extra - pagado
     saldo = acumulado_teorico + aportaciones_extra - total_pagado
 
-   # Próximas cuotas pendientes (irregulares + pagos únicos próximos)
-        # Próximas cuotas pendientes (irregulares + pagos únicos próximos)
+ 
+        # Próximas cuotas pendientes (irregulares + pagos únicos próximos 3 años)
     if hogar_id:
         cur.execute("""
             SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
