@@ -195,6 +195,12 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
             VALUES (%s, %s, %s, %s, %s)
         """, (hogar_id, user_id, data.cantidad, mes, anio))
 
+    # Registrar como ahorro voluntario para descontarlo de la mesada
+    cur.execute("""
+        INSERT INTO ahorro_voluntario (usuario_id, hogar_id, fondo_id, cantidad, mes, anio)
+        VALUES (%s, %s, NULL, %s, %s, %s)
+    """, (user_id, hogar_id, data.cantidad, mes, anio))
+
     conn.commit()
     cur.close()
     conn.close()
