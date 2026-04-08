@@ -140,6 +140,7 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
     hogar = cur.fetchone()
     hogar_id = hogar[0] if hogar else None
 
+    # Ingresos totales
     if hogar_id:
         cur.execute("""
             SELECT COALESCE(SUM(importe), 0) FROM ingresos
@@ -152,14 +153,48 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
         """, (user_id, mes, anio))
     ingreso_total = float(cur.fetchone()[0])
 
+    # Porcentaje ahorro
     cur.execute("""
         SELECT porcentaje_ahorro FROM presupuesto_hogar
         WHERE hogar_id IS NOT DISTINCT FROM %s AND mes = %s AND anio = %s
     """, (hogar_id, mes, anio))
     presupuesto = cur.fetchone()
     pct_ahorro = float(presupuesto[0]) if presupuesto else 20.0
-    tras_ahorro = ingreso_total * (1 - pct_ahorro / 100)
+    monto_ahorro = ingreso_total * pct_ahorro / 100
+    tras_ahorro = ingreso_total - monto_ahorro
 
+    # Gastos comunes y periódicos
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0) FROM gastos_comunes
+            WHERE hogar_id = %s
+            AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+        """, (hogar_id,))
+        gastos_comunes = float(cur.fetchone()[0])
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+        periodicos = float(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM hogar_miembros WHERE hogar_id = %s", (hogar_id,))
+        num_miembros = cur.fetchone()[0]
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0) FROM gastos_comunes
+            WHERE usuario_id = %s AND hogar_id IS NULL
+            AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+        """, (user_id,))
+        gastos_comunes = float(cur.fetchone()[0])
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
+        periodicos = float(cur.fetchone()[0])
+        num_miembros = 1
+
+    mesada = (tras_ahorro - gastos_comunes - periodicos) / num_miembros if num_miembros > 0 else 0
+
+    # Gastos personales del mes
     cur.execute("""
         SELECT COALESCE(SUM(importe), 0) FROM gastos
         WHERE usuario_id = %s
@@ -167,13 +202,30 @@ def aportar_fondo(data: AportarFondoRequest, user_id: int = Depends(get_user)):
     """, (user_id,))
     gastos_personales = float(cur.fetchone()[0])
 
-    disponible = tras_ahorro - gastos_personales
+    # Ahorro personal acumulado
+    cur.execute("""
+        SELECT COALESCE(SUM(acumulado), 0)
+        FROM ahorro_personal WHERE usuario_id = %s
+    """, (user_id,))
+    ahorro_personal = float(cur.fetchone()[0])
+
+    # Ahorro voluntario ya hecho este mes
+    cur.execute("""
+        SELECT COALESCE(SUM(cantidad), 0)
+        FROM ahorro_voluntario
+        WHERE usuario_id = %s AND mes = %s AND anio = %s
+    """, (user_id, mes, anio))
+    ahorro_voluntario = float(cur.fetchone()[0])
+
+    disponible = mesada - gastos_personales - ahorro_personal - ahorro_voluntario
+
     if data.cantidad > disponible:
         raise HTTPException(
             status_code=400,
-            detail=f"No tienes suficiente mesada. Disponible: {disponible:.2f}€"
+            detail=f"No tienes suficiente mesada disponible. Disponible: {disponible:.2f}€"
         )
 
+    # Añadir al fondo
     if hogar_id:
         cur.execute("""
             SELECT id FROM fondo_periodicos
