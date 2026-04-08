@@ -181,19 +181,30 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
 
     if hogar_id:
         cur.execute("""
-            SELECT importe FROM gastos_periodicos
-            WHERE id = %s AND hogar_id = %s
+            SELECT importe, frecuencia, proximo_pago
+            FROM gastos_periodicos WHERE id = %s AND hogar_id = %s
         """, (gasto_id, hogar_id))
     else:
         cur.execute("""
-            SELECT importe FROM gastos_periodicos
-            WHERE id = %s AND usuario_id = %s AND hogar_id IS NULL
+            SELECT importe, frecuencia, proximo_pago
+            FROM gastos_periodicos WHERE id = %s AND usuario_id = %s AND hogar_id IS NULL
         """, (gasto_id, user_id))
 
     gasto = cur.fetchone()
     if not gasto:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
+
     importe = float(gasto[0])
+    frecuencia = gasto[1]
+    proximo_pago = gasto[2]
+
+    # Verificar si tiene cuotas irregulares pendientes
+    cur.execute("""
+        SELECT id, importe, fecha_pago FROM cuotas_periodicas
+        WHERE gasto_periodico_id = %s AND pagada = FALSE
+        ORDER BY fecha_pago ASC LIMIT 1
+    """, (gasto_id,))
+    cuota_proxima = cur.fetchone()
 
     # Calcular acumulado teórico del fondo
     if hogar_id:
@@ -235,31 +246,74 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
     total_pagado = float(cur.fetchone()[0])
     acumulado_disponible = acumulado_teorico - total_pagado
 
-    if acumulado_disponible < importe:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe:.2f}€"
-        )
+    if cuota_proxima:
+        # Tiene cuotas irregulares - pagar la próxima cuota
+        cuota_id = cuota_proxima[0]
+        importe_cuota = float(cuota_proxima[1])
+        fecha_cuota = cuota_proxima[2]
 
-    cur.execute("""
-        INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago, pagada)
-        VALUES (%s, %s, CURRENT_DATE, TRUE)
-    """, (gasto_id, importe))
+        if acumulado_disponible < importe_cuota:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe_cuota:.2f}€"
+            )
 
-    cur.execute("""
-        UPDATE gastos_periodicos
-        SET proximo_pago = CASE
-            WHEN proximo_pago IS NOT NULL
-            THEN proximo_pago + (frecuencia * INTERVAL '1 month')
-            ELSE CURRENT_DATE + (frecuencia * INTERVAL '1 month')
-        END
-        WHERE id = %s
-    """, (gasto_id,))
+        # Marcar cuota como pagada
+        cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
+
+        # Crear la misma cuota para el próximo año
+        nueva_fecha = fecha_cuota.replace(year=fecha_cuota.year + 1)
+        cur.execute("""
+            INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
+            VALUES (%s, %s, %s)
+        """, (gasto_id, importe_cuota, nueva_fecha))
+
+        # Actualizar próximo pago al de la siguiente cuota pendiente
+        cur.execute("""
+            SELECT fecha_pago FROM cuotas_periodicas
+            WHERE gasto_periodico_id = %s AND pagada = FALSE
+            ORDER BY fecha_pago ASC LIMIT 1
+        """, (gasto_id,))
+        siguiente = cur.fetchone()
+        if siguiente:
+            cur.execute("UPDATE gastos_periodicos SET proximo_pago = %s WHERE id = %s",
+                       (siguiente[0], gasto_id))
+
+        importe_pagado = importe_cuota
+
+    else:
+        # Pago único - verificar fondo
+        if acumulado_disponible < importe:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe:.2f}€"
+            )
+
+        # Registrar pago
+        cur.execute("""
+            INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago, pagada)
+            VALUES (%s, %s, CURRENT_DATE, TRUE)
+        """, (gasto_id, importe))
+
+        # Calcular próximo pago según frecuencia
+        if proximo_pago:
+            nuevo_proximo = proximo_pago + datetime.timedelta(days=frecuencia * 30)
+        else:
+            nuevo_proximo = hoy + datetime.timedelta(days=frecuencia * 30)
+
+        cur.execute("UPDATE gastos_periodicos SET proximo_pago = %s WHERE id = %s",
+                   (nuevo_proximo, gasto_id))
+
+        importe_pagado = importe
 
     conn.commit()
     cur.close()
     conn.close()
-    return {"mensaje": "Pago registrado", "descontado": importe, "fondo_restante": acumulado_disponible - importe}
+    return {
+        "mensaje": "Pago registrado",
+        "descontado": importe_pagado,
+        "fondo_restante": acumulado_disponible - importe_pagado
+    }
 
 @router.get("/{gasto_id}/cuotas")
 def get_cuotas(gasto_id: int, user_id: int = Depends(get_user)):
