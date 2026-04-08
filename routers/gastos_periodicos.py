@@ -3,7 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_connection
 from auth import decode_token
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import datetime
 
 router = APIRouter(prefix="/gastos-periodicos", tags=["gastos-periodicos"])
@@ -14,6 +14,7 @@ class GastoPeriodicoRequest(BaseModel):
     importe: float
     frecuencia: int
     proximo_pago: Optional[str] = None
+    cuotas: Optional[List[Dict[str, Any]]] = None
 
 class EditarGastoPeriodicoRequest(BaseModel):
     nombre: Optional[str] = None
@@ -94,10 +95,25 @@ def crear_gasto_periodico(data: GastoPeriodicoRequest, user_id: int = Depends(ge
         VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, reserva_mensual
     """, (hogar_id, user_id, data.nombre, data.importe, data.frecuencia, data.proximo_pago))
     row = cur.fetchone()
+    gasto_id = row[0]
+    reserva = float(row[1])
+
+    # Crear cuotas irregulares si se proporcionan
+    if data.cuotas:
+        for cuota in data.cuotas:
+            cur.execute("""
+                INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago)
+                VALUES (%s, %s, %s)
+            """, (gasto_id, cuota["importe"], cuota["fecha_pago"]))
+
     conn.commit()
     cur.close()
     conn.close()
-    return {"mensaje": "Gasto periódico creado", "id": row[0], "reserva_mensual": float(row[1])}
+    return {
+        "mensaje": "Gasto periódico creado",
+        "id": gasto_id,
+        "reserva_mensual": reserva
+    }
 
 @router.put("/{gasto_id}")
 def editar_gasto_periodico(gasto_id: int, data: EditarGastoPeriodicoRequest, user_id: int = Depends(get_user)):

@@ -35,59 +35,80 @@ def get_hogar_id(cur, user_id: int):
 def get_fondo(user_id: int = Depends(get_user)):
     conn = get_connection()
     cur = conn.cursor()
-    hogar_id = get_hogar_id(cur, user_id)
-    hoy = datetime.date.today()
+    cur.execute("SELECT hogar_id FROM hogar_miembros WHERE usuario_id = %s", (user_id,))
+    hogar = cur.fetchone()
+    hogar_id = hogar[0] if hogar else None
 
     # Reserva mensual total
-    cur.execute("""
-        SELECT COALESCE(SUM(reserva_mensual), 0)
-        FROM gastos_periodicos WHERE hogar_id = %s
-    """, (hogar_id,))
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE hogar_id = %s
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
     reserva_mensual = float(cur.fetchone()[0])
 
-    # Fecha de creación del primer gasto periódico
-    cur.execute("""
-        SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s
-    """, (hogar_id,))
+    # Fecha primer gasto periódico
+    if hogar_id:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE hogar_id = %s", (hogar_id,))
+    else:
+        cur.execute("SELECT MIN(creado_en) FROM gastos_periodicos WHERE usuario_id = %s AND hogar_id IS NULL", (user_id,))
     primera_fecha = cur.fetchone()[0]
 
-    # Calcular meses transcurridos desde el primer gasto periódico
-    if primera_fecha:
-        meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1
-    else:
-        meses = 0
-
-    # Acumulado teórico = reserva mensual * meses transcurridos
+    import datetime
+    hoy = datetime.date.today()
+    meses = (hoy.year - primera_fecha.year) * 12 + (hoy.month - primera_fecha.month) + 1 if primera_fecha else 0
     acumulado_teorico = reserva_mensual * meses
 
-    # Total ya pagado en cuotas
-    cur.execute("""
-        SELECT COALESCE(SUM(cp.importe), 0)
-        FROM cuotas_periodicas cp
-        JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
-        WHERE gp.hogar_id = %s AND cp.pagada = TRUE
-    """, (hogar_id,))
+    # Total pagado en cuotas
+    if hogar_id:
+        cur.execute("""
+            SELECT COALESCE(SUM(cp.importe), 0)
+            FROM cuotas_periodicas cp
+            JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+            WHERE gp.hogar_id = %s AND cp.pagada = TRUE
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(cp.importe), 0)
+            FROM cuotas_periodicas cp
+            JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+            WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = TRUE
+        """, (user_id,))
     total_pagado = float(cur.fetchone()[0])
 
-    # Acumulado disponible
-    acumulado_disponible = acumulado_teorico - total_pagado
+    saldo = acumulado_teorico - total_pagado
 
     # Próximas cuotas pendientes
-    cur.execute("""
-        SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago, cp.pagada,
-               (cp.fecha_pago - CURRENT_DATE) as dias_restantes
-        FROM cuotas_periodicas cp
-        JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
-        WHERE gp.hogar_id = %s AND cp.pagada = FALSE
-        ORDER BY cp.fecha_pago ASC
-    """, (hogar_id,))
+    if hogar_id:
+        cur.execute("""
+            SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
+                   (cp.fecha_pago - CURRENT_DATE) as dias_restantes
+            FROM cuotas_periodicas cp
+            JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+            WHERE gp.hogar_id = %s AND cp.pagada = FALSE
+            ORDER BY cp.fecha_pago ASC
+        """, (hogar_id,))
+    else:
+        cur.execute("""
+            SELECT cp.id, gp.nombre, cp.importe, cp.fecha_pago,
+                   (cp.fecha_pago - CURRENT_DATE) as dias_restantes
+            FROM cuotas_periodicas cp
+            JOIN gastos_periodicos gp ON cp.gasto_periodico_id = gp.id
+            WHERE gp.usuario_id = %s AND gp.hogar_id IS NULL AND cp.pagada = FALSE
+            ORDER BY cp.fecha_pago ASC
+        """, (user_id,))
     cuotas = cur.fetchall()
 
     cur.close()
     conn.close()
 
     return {
-        "acumulado": acumulado_disponible,
+        "saldo": saldo,
         "reserva_mensual": reserva_mensual,
         "meses_acumulados": meses,
         "cuotas_pendientes": [{
@@ -95,10 +116,9 @@ def get_fondo(user_id: int = Depends(get_user)):
             "nombre": r[1],
             "importe": float(r[2]),
             "fecha_pago": str(r[3]),
-            "pagada": r[4],
-            "dias_restantes": r[5].days if r[5] else None,
-            "alerta": r[5].days <= 30 if r[5] else False,
-            "cubierta": acumulado_disponible >= float(r[2])
+            "dias_restantes": r[4].days if r[4] else None,
+            "alerta": r[4].days <= 30 if r[4] else False,
+            "cubierta": saldo >= float(r[2])
         } for r in cuotas]
     }
 
