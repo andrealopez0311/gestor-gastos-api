@@ -287,8 +287,12 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
                 detail=f"Fondo insuficiente. Disponible: {acumulado_disponible:.2f}€, necesitas: {importe_cuota:.2f}€"
             )
 
-        # Marcar cuota actual como pagada
-        cur.execute("UPDATE cuotas_periodicas SET pagada = TRUE WHERE id = %s", (cuota_id,))
+        # Marcar cuota actual como pagada con fecha de pago real
+        cur.execute("""
+            UPDATE cuotas_periodicas
+            SET pagada = TRUE, fecha_pagado = CURRENT_DATE
+            WHERE id = %s
+        """, (cuota_id,))
 
         # Verificar cuántos años futuros tenemos cubiertos
         cur.execute("""
@@ -306,7 +310,6 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
                 VALUES (%s, %s, %s)
             """, (gasto_id, importe_cuota, nueva_fecha))
 
-        # Commit para que la nueva cuota sea visible
         conn.commit()
 
         # Buscar siguiente cuota pendiente
@@ -331,9 +334,9 @@ def registrar_pago(gasto_id: int, user_id: int = Depends(get_user)):
             )
 
         cur.execute("""
-            INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago, pagada)
-            VALUES (%s, %s, CURRENT_DATE, TRUE)
-        """, (gasto_id, importe))
+            INSERT INTO cuotas_periodicas (gasto_periodico_id, importe, fecha_pago, pagada, fecha_pagado)
+            VALUES (%s, %s, %s, TRUE, CURRENT_DATE)
+        """, (gasto_id, importe, proximo_pago or hoy))
 
         if proximo_pago:
             nuevo_proximo = proximo_pago + datetime.timedelta(days=frecuencia * 30)
@@ -360,7 +363,6 @@ def get_cuotas(gasto_id: int, user_id: int = Depends(get_user)):
     cur = conn.cursor()
     hogar_id = get_hogar_id_opcional(cur, user_id)
 
-    # Verificar que el gasto pertenece al usuario o su hogar
     if hogar_id:
         cur.execute("""
             SELECT id FROM gastos_periodicos
@@ -376,7 +378,7 @@ def get_cuotas(gasto_id: int, user_id: int = Depends(get_user)):
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
 
     cur.execute("""
-        SELECT id, importe, fecha_pago, pagada
+        SELECT id, importe, fecha_pago, pagada, fecha_pagado
         FROM cuotas_periodicas
         WHERE gasto_periodico_id = %s
         ORDER BY fecha_pago ASC
@@ -389,8 +391,9 @@ def get_cuotas(gasto_id: int, user_id: int = Depends(get_user)):
     return [{
         "id": r[0],
         "importe": float(r[1]),
-        "fecha_pago": str(r[2]),
+        "fecha_vencimiento": str(r[2]),
         "pagada": r[3],
-        "dias_restantes": (r[2] - hoy).days if r[2] else None,
-        "alerta": (r[2] - hoy).days <= 30 if r[2] else False
+        "fecha_pagado": str(r[4]) if r[4] else None,
+        "dias_restantes": (r[2] - hoy).days if r[2] and not r[3] else None,
+        "alerta": (r[2] - hoy).days <= 30 if r[2] and not r[3] else False
     } for r in rows]
