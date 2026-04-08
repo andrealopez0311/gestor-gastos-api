@@ -111,7 +111,7 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
     monto_ahorro = ingreso_total * pct_ahorro / 100
     tras_ahorro = ingreso_total - monto_ahorro
 
-    # Gastos comunes y periódicos
+# Gastos comunes y periódicos
     gastos_comunes_real = 0.0
     total_periodicos = 0.0
     if hogar_id:
@@ -127,6 +127,21 @@ def get_resumen_hogar(user_id: int = Depends(get_user)):
             SELECT COALESCE(SUM(reserva_mensual), 0)
             FROM gastos_periodicos WHERE hogar_id = %s
         """, (hogar_id,))
+        total_periodicos = float(cur.fetchone()[0])
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(importe), 0)
+            FROM gastos_comunes
+            WHERE usuario_id = %s AND hogar_id IS NULL
+            AND DATE_TRUNC('month', fecha) = DATE_TRUNC('month', CURRENT_DATE)
+        """, (user_id,))
+        gastos_comunes_real = float(cur.fetchone()[0])
+
+        cur.execute("""
+            SELECT COALESCE(SUM(reserva_mensual), 0)
+            FROM gastos_periodicos
+            WHERE usuario_id = %s AND hogar_id IS NULL
+        """, (user_id,))
         total_periodicos = float(cur.fetchone()[0])
 
     total_egresos = gastos_comunes_real + total_periodicos
